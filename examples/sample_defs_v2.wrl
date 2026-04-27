@@ -1,0 +1,71 @@
+#VRML V2.0 utf8
+
+
+
+Group {
+  children [
+    Shape {
+      appearance
+        Appearance {
+          material
+            DEF SharedMat Material {
+              ambientIntensity 0.133333333
+              diffuseColor 0.3 0.8 0.4
+              specularColor 0 0 0
+              emissiveColor 0 0 0
+              shininess 0.2
+              transparency 0
+            }
+        }
+      geometry
+        IndexedLineSet {
+          coord
+            DEF SharedCoords Coordinate {
+              point [
+                0 0 0
+                2 0 0
+                0 2 0
+                2 2 0
+              ]
+            }
+          color
+            Color {
+              color [
+                0.3 0.8 0.4
+              ]
+            }
+          coordIndex [
+            0
+            1
+            3
+            2
+            0
+            -1
+          ]
+        }
+    }
+    Transform {
+      translation 0 0 2
+      children [
+        Shape {
+          appearance
+            Appearance {
+              material
+                USE SharedMat
+            }
+          geometry
+            PointSet {
+              coord
+                USE SharedCoords
+              color
+                Color {
+                  color [
+                    0.3 0.8 0.4
+                  ]
+                }
+            }
+        }
+      ]
+    }
+  ]
+}

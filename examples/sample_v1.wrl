@@ -1,0 +1,84 @@
+#VRML V1.0 ascii
+
+Separator {
+  PerspectiveCamera {
+    position 0 2 8
+    orientation 0 1 0 0
+    heightAngle 0.785398
+  }
+
+  DirectionalLight {
+    direction 0 -1 -1
+    color 1 1 1
+    intensity 0.8
+  }
+
+  Material {
+    ambientColor 0.2 0.2 0.2
+    diffuseColor [
+      0.8 0.2 0.2
+      0.2 0.6 0.9
+    ]
+    specularColor 0.1 0.1 0.1
+    shininess 0.3
+  }
+
+  MaterialBinding {
+    value PER_FACE_INDEXED
+  }
+
+  Coordinate3 {
+    point [
+      -1 0 -1
+      1 0 -1
+      1 0 1
+      -1 0 1
+      0 1.5 0
+    ]
+  }
+
+  ShapeHints {
+    vertexOrdering COUNTERCLOCKWISE
+    shapeType SOLID
+    faceType CONVEX
+    creaseAngle 0.5
+  }
+
+  IndexedFaceSet {
+    coordIndex [
+      0, 1, 4, -1,
+      1, 2, 4, -1,
+      2, 3, 4, -1,
+      3, 0, 4, -1,
+      0, 1, 2, 3, -1
+    ]
+    materialIndex [ 0, 1, 0, 1, 0 ]
+  }
+
+  Translation {
+    translation 3 0 0
+  }
+
+  Cube {
+    width 1.5
+    height 1.5
+    depth 1.5
+  }
+
+  Translation {
+    translation -6 0 0
+  }
+
+  FontStyle {
+    size 0.7
+    family SERIF
+    style ITALIC
+  }
+
+  AsciiText {
+    string [ "VRML1" "to" "VRML2" ]
+    spacing 1.2
+    justification CENTER
+    width 6
+  }
+}
