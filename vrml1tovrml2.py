@@ -703,7 +703,15 @@ class VrmlConverter:
     def _wrap_root(self, nodes: list[OutNode]) -> OutNode:
         """Wrap the scene in the same root structure used by the original converter."""
 
-        group = OutNode("Group", fields=[("children", nodes)])
+        group_children = nodes
+        # Avoid introducing an extra synthetic Group when the converted root is
+        # already a plain Group wrapper from a top-level Separator.
+        if len(nodes) == 1 and nodes[0].node_type == "Group" and nodes[0].def_name is None:
+            first_fields = dict(nodes[0].fields)
+            children_value = first_fields.get("children")
+            if isinstance(children_value, list):
+                group_children = children_value
+        group = OutNode("Group", fields=[("children", group_children)])
         return OutNode("Collision", fields=[("collide", False), ("children", [group])])
 
     def _convert_sequence(self, statements: list[Any], state: ConversionState) -> list[OutNode]:
@@ -915,28 +923,30 @@ class VrmlConverter:
         color_node, color_index = self._build_color_node(state, node)
         if color_node is not None:
             fields.append(("color", color_node))
-        fields.append(("coordIndex", list(node.fields.get("coordIndex", []))))
-        if "normalIndex" in node.fields:
-            fields.append(("normalIndex", list(node.fields["normalIndex"])))
-        if "textureCoordIndex" in node.fields:
-            fields.append(("texCoordIndex", list(node.fields["textureCoordIndex"])))
-        if color_index:
-            fields.append(("colorIndex", color_index))
+        trailing_fields: list[tuple[str, Any]] = []
         material_binding = (state.material_binding or "OVERALL").upper()
         normal_binding = (state.normal_binding or "PER_VERTEX_INDEXED").upper()
         if material_binding in {"PER_FACE", "PER_FACE_INDEXED", "PER_PART", "PER_PART_INDEXED"}:
-            fields.append(("colorPerVertex", False))
+            trailing_fields.append(("colorPerVertex", False))
         if normal_binding in {"PER_FACE", "PER_FACE_INDEXED", "PER_PART", "PER_PART_INDEXED"}:
-            fields.append(("normalPerVertex", False))
+            trailing_fields.append(("normalPerVertex", False))
         shape_hints = state.shape_hints
         if shape_hints.get("vertexOrdering", "").upper() == "CLOCKWISE":
-            fields.append(("ccw", False))
+            trailing_fields.append(("ccw", False))
         # The original converter emits these defaults aggressively.
         if shape_hints.get("shapeType", "").upper() != "SOLID":
-            fields.append(("solid", False))
+            trailing_fields.append(("solid", False))
         if shape_hints.get("faceType") and shape_hints.get("faceType", "").upper() != "CONVEX":
-            fields.append(("convex", False))
-        fields.append(("creaseAngle", float(shape_hints.get("creaseAngle", 0.5))))
+            trailing_fields.append(("convex", False))
+        trailing_fields.append(("creaseAngle", float(shape_hints.get("creaseAngle", 0.5))))
+        trailing_fields.append(("coordIndex", list(node.fields.get("coordIndex", []))))
+        if color_index:
+            trailing_fields.append(("colorIndex", color_index))
+        if "normalIndex" in node.fields:
+            trailing_fields.append(("normalIndex", list(node.fields["normalIndex"])))
+        if "textureCoordIndex" in node.fields:
+            trailing_fields.append(("texCoordIndex", list(node.fields["textureCoordIndex"])))
+        fields.extend(trailing_fields)
         return OutNode("IndexedFaceSet", fields=fields)
 
     def _convert_indexed_line_set(self, node: AstNode, state: ConversionState) -> OutNode:
@@ -948,12 +958,12 @@ class VrmlConverter:
         color_node, color_index = self._build_color_node(state, node)
         if color_node is not None:
             fields.append(("color", color_node))
-        fields.append(("coordIndex", list(node.fields.get("coordIndex", []))))
-        if color_index:
-            fields.append(("colorIndex", color_index))
         material_binding = (state.material_binding or "OVERALL").upper()
         if material_binding in {"PER_FACE", "PER_FACE_INDEXED", "PER_PART", "PER_PART_INDEXED"}:
             fields.append(("colorPerVertex", False))
+        fields.append(("coordIndex", list(node.fields.get("coordIndex", []))))
+        if color_index:
+            fields.append(("colorIndex", color_index))
         return OutNode("IndexedLineSet", fields=fields)
 
     def _convert_point_set(self, node: AstNode, state: ConversionState) -> OutNode:
@@ -1380,21 +1390,21 @@ class VrmlWriter:
         """Serialize the provided nodes into a full VRML 2.0 document."""
 
         LOGGER.info("Serializing VRML 2.0 output")
-        blocks = [VRML2_HEADER, ""]
+        blocks = [VRML2_HEADER]
         blocks.extend(self._render_node(node, 0) for node in nodes)
         return "\n\n".join(blocks).rstrip() + "\n"
 
     def _render_node(self, node: OutNode | UseRef, indent: int) -> str:
         """Render one node reference or full node definition."""
 
-        prefix = " " * indent
+        prefix = self._indent(indent)
         if isinstance(node, UseRef):
             return f"{prefix}USE {node.name}"
         header = node.node_type
         if node.def_name:
             header = f"DEF {node.def_name} {header}"
         if not node.fields:
-            return f"{prefix}{header} {{ }}"
+            return f"{prefix}{header} {{\n{prefix}}}"
         lines = [f"{prefix}{header} {{"]
         for field_name, value in node.fields:
             lines.extend(self._render_field(field_name, value, indent + 2))
@@ -1404,14 +1414,17 @@ class VrmlWriter:
     def _render_field(self, field_name: str, value: Any, indent: int) -> list[str]:
         """Render one field assignment with appropriate multiline formatting."""
 
-        prefix = " " * indent
+        prefix = self._indent(indent)
         if isinstance(value, (OutNode, UseRef)):
             node_lines = self._render_node(value, indent + 2).splitlines()
             return [f"{prefix}{field_name}"] + node_lines
         if isinstance(value, list) and value and all(isinstance(item, (OutNode, UseRef)) for item in value):
             lines = [f"{prefix}{field_name} ["]
-            for item in value:
-                lines.append(self._render_node(item, indent + 2))
+            for index, item in enumerate(value):
+                rendered_item = self._render_node(item, indent + 2).splitlines()
+                if index < len(value) - 1:
+                    rendered_item[-1] = f"{rendered_item[-1]},"
+                lines.extend(rendered_item)
             lines.append(f"{prefix}]")
             return lines
         if isinstance(value, list):
@@ -1422,13 +1435,16 @@ class VrmlWriter:
     def _render_list(self, values: list[Any], indent: int) -> list[str]:
         """Render one scalar or vector list body."""
 
-        prefix = " " * indent
+        prefix = self._indent(indent)
         lines: list[str] = []
-        for value in values:
+        for index, value in enumerate(values):
             if isinstance(value, tuple):
-                lines.append(f"{prefix}{' '.join(self._format_number(number) for number in value)}")
+                line = f"{prefix}{' '.join(self._format_number(number) for number in value)}"
             else:
-                lines.append(f"{prefix}{self._render_scalar(value)}")
+                line = f"{prefix}{self._render_scalar(value)}"
+            if index < len(values) - 1:
+                line = f"{line},"
+            lines.append(line)
         return lines
 
     def _render_scalar(self, value: Any) -> str:
@@ -1448,6 +1464,11 @@ class VrmlWriter:
         """Format one number without noisy trailing zeros."""
 
         return f"{value:.9g}"
+
+    def _indent(self, indent: int) -> str:
+        """Translate the logical indent step count into tabs like the original tool."""
+
+        return "\t" * (indent // 2)
 
 
 def convert_vrml1_text(text: str) -> str:
