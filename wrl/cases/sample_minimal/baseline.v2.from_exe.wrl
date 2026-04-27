@@ -1,0 +1,32 @@
+#VRML V2.0 utf8
+
+Collision {
+    collide FALSE
+    children [
+	Group {
+	    children [
+		Shape {
+		    appearance
+			Appearance {
+			    material
+				DEF _DefMat Material {
+				}
+			}
+		    geometry
+			IndexedFaceSet {
+			    coord
+				Coordinate {
+				    point	[ 0 0 0,
+						      1 0 0,
+						      0 1 0 ]
+				}
+			    solid	FALSE
+			    creaseAngle	0.5
+			    coordIndex	[ 0, 1, 2, -1 ]
+			}
+		}
+	    ]
+	}
+    ]
+}
+

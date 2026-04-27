@@ -9,6 +9,29 @@ Linux-native reimplementation of the old Windows `vrml1tovrml2.exe` workflow.
 - 示例输入：`examples/sample_v1.wrl`
 - 示例输出：`examples/sample_v2.wrl`
 
+## WRL 目录建议
+
+为了后续持续回归，建议把用于对比的 `.wrl` 样例统一按 case 组织在 `wrl/cases/` 下：
+
+```text
+wrl/
+  cases/
+    <case-name>/
+      input.v1.wrl
+      baseline.v2.from_exe.wrl
+      current.v2.from_python.wrl
+```
+
+这样每个测试样例的输入、Windows 真值输出、当前实现输出都放在同一个目录里，后续新增样例、做 diff、写自动化脚本都会更顺手。
+
+当前已整理的 case：
+
+- [sample_minimal](/home/cesar/vrml1tovrml2/wrl/cases/sample_minimal)
+- [ansys_test_from_ansys_1](/home/cesar/vrml1tovrml2/wrl/cases/ansys_test_from_ansys_1)
+
+其中 [wrl/cases/ansys_test_from_ansys_1/baseline.v2.from_exe.wrl](/home/cesar/vrml1tovrml2/wrl/cases/ansys_test_from_ansys_1/baseline.v2.from_exe.wrl)
+已经作为项目内真值保存，后续迭代默认直接使用这个文件，不需要再调用一次原始 `.exe`。
+
 ## 用法
 
 ```bash
@@ -44,6 +67,7 @@ Linux-native reimplementation of the old Windows `vrml1tovrml2.exe` workflow.
 ```bash
 ./vrml1tovrml2 examples/sample_v1.wrl examples/sample_v2.wrl
 ./vrml1tovrml2 examples/sample_defs_v1.wrl examples/sample_defs_v2.wrl
+./scripts/regenerate_testset.sh
 ```
 
 两个示例都能成功生成 `#VRML V2.0 utf8` 输出。
@@ -59,3 +83,4 @@ Linux-native reimplementation of the old Windows `vrml1tovrml2.exe` workflow.
 
 - 解析、转换、输出都在 [vrml1tovrml2.py](/home/cesar/vrml1tovrml2/vrml1tovrml2.py)。
 - 代码里在关键路径补了必要日志和简短注释，便于继续对照逆向资料扩展。
+- 回归脚本在 [scripts/regenerate_testset.sh](/home/cesar/vrml1tovrml2/scripts/regenerate_testset.sh)。

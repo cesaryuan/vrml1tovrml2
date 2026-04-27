@@ -691,10 +691,20 @@ class VrmlConverter:
 
         LOGGER.info("Converting parsed scene graph to VRML 2.0")
         self.emitted_defs: set[str] = set()
+        self.generated_material_names: dict[tuple[Any, ...], str] = {}
+        self.generated_material_counter = 0
         state = ConversionState()
         nodes = self._convert_sequence(statements, state)
+        if nodes:
+            nodes = [self._wrap_root(nodes)]
         LOGGER.info("Generated %d VRML 2.0 top-level nodes", len(nodes))
         return nodes
+
+    def _wrap_root(self, nodes: list[OutNode]) -> OutNode:
+        """Wrap the scene in the same root structure used by the original converter."""
+
+        group = OutNode("Group", fields=[("children", nodes)])
+        return OutNode("Collision", fields=[("collide", False), ("children", [group])])
 
     def _convert_sequence(self, statements: list[Any], state: ConversionState) -> list[OutNode]:
         """Convert one ordered list of statements under the same traversal state."""
@@ -921,12 +931,12 @@ class VrmlConverter:
         shape_hints = state.shape_hints
         if shape_hints.get("vertexOrdering", "").upper() == "CLOCKWISE":
             fields.append(("ccw", False))
-        if shape_hints.get("shapeType", "").upper() != "SOLID" and shape_hints.get("shapeType"):
+        # The original converter emits these defaults aggressively.
+        if shape_hints.get("shapeType", "").upper() != "SOLID":
             fields.append(("solid", False))
-        if shape_hints.get("faceType", "").upper() != "CONVEX" and shape_hints.get("faceType"):
+        if shape_hints.get("faceType") and shape_hints.get("faceType", "").upper() != "CONVEX":
             fields.append(("convex", False))
-        if "creaseAngle" in shape_hints:
-            fields.append(("creaseAngle", float(shape_hints["creaseAngle"])))
+        fields.append(("creaseAngle", float(shape_hints.get("creaseAngle", 0.5))))
         return OutNode("IndexedFaceSet", fields=fields)
 
     def _convert_indexed_line_set(self, node: AstNode, state: ConversionState) -> OutNode:
@@ -1024,16 +1034,11 @@ class VrmlConverter:
 
         appearance_fields: list[tuple[str, Any]] = []
         material = self._resolve_material(state.material, state)
-        if material is not None:
-            appearance_fields.append(("material", self._material_reference_to_output(state.material, material)))
+        appearance_fields.append(("material", self._material_reference_to_output(state.material, material)))
         if state.texture is not None:
             appearance_fields.append(("texture", self._materialize_reference(state.texture)))
         if state.texture_transform is not None:
             appearance_fields.append(("textureTransform", self._materialize_reference(state.texture_transform)))
-        if geometry_node.node_type in {"IndexedLineSet", "PointSet"} and not appearance_fields and material is None:
-            return None
-        if not appearance_fields:
-            return None
         return OutNode("Appearance", fields=appearance_fields)
 
     def _build_color_node(self, state: ConversionState, geometry_node: AstNode) -> tuple[OutNode | None, list[int] | None]:
@@ -1072,27 +1077,33 @@ class VrmlConverter:
         diffuse = material.diffuse_colors[0]
         ambient = material.ambient_colors[0] if material.ambient_colors else (0.2, 0.2, 0.2)
         ambient_intensity = max(0.0, min(1.0, sum(ambient) / 3.0))
-        fields: list[tuple[str, Any]] = [
-            ("ambientIntensity", ambient_intensity),
-            ("diffuseColor", diffuse),
-        ]
-        if material.specular_colors:
+        fields: list[tuple[str, Any]] = []
+        if abs(ambient_intensity - 0.2) > 1e-9:
+            fields.append(("ambientIntensity", ambient_intensity))
+        if diffuse != (0.8, 0.8, 0.8):
+            fields.append(("diffuseColor", diffuse))
+        if material.specular_colors and material.specular_colors[0] != (0.0, 0.0, 0.0):
             fields.append(("specularColor", material.specular_colors[0]))
-        if material.emissive_colors:
+        if material.emissive_colors and material.emissive_colors[0] != (0.0, 0.0, 0.0):
             fields.append(("emissiveColor", material.emissive_colors[0]))
-        if material.shininess:
+        if material.shininess and abs(material.shininess[0] - 0.2) > 1e-9:
             fields.append(("shininess", material.shininess[0]))
-        if material.transparency:
+        if material.transparency and abs(material.transparency[0] - 0.0) > 1e-9:
             fields.append(("transparency", material.transparency[0]))
         return OutNode("Material", fields=fields, def_name=material.def_name)
 
     def _material_reference_to_output(
         self,
         material_ref: MaterialState | UseRef | DefinitionRef | None,
-        material: MaterialState,
+        material: MaterialState | None,
     ) -> OutNode | UseRef:
         """Emit a shared Material definition once and return `USE` for later references."""
 
+        if material is None:
+            if "_DefMat" in self.emitted_defs:
+                return UseRef("_DefMat")
+            self.emitted_defs.add("_DefMat")
+            return OutNode("Material", fields=[], def_name="_DefMat")
         if isinstance(material_ref, DefinitionRef):
             if material_ref.name in self.emitted_defs:
                 return UseRef(material_ref.name)
@@ -1102,7 +1113,28 @@ class VrmlConverter:
             return material_node
         if isinstance(material_ref, UseRef):
             return UseRef(material_ref.name)
-        return self._material_to_out_node(material)
+        signature = self._material_signature(material)
+        if signature in self.generated_material_names:
+            return UseRef(self.generated_material_names[signature])
+        generated_name = f"_v2%{self.generated_material_counter}"
+        self.generated_material_counter += 1
+        self.generated_material_names[signature] = generated_name
+        material_node = self._material_to_out_node(material)
+        material_node.def_name = generated_name
+        self.emitted_defs.add(generated_name)
+        return material_node
+
+    def _material_signature(self, material: MaterialState) -> tuple[Any, ...]:
+        """Create a stable signature for implicit material reuse."""
+
+        return (
+            tuple(material.ambient_colors),
+            tuple(material.diffuse_colors),
+            tuple(material.specular_colors),
+            tuple(material.emissive_colors),
+            tuple(material.shininess),
+            tuple(material.transparency),
+        )
 
     def _simple_out_node(self, node: AstNode, new_type: str) -> OutNode:
         """Copy the source fields into a differently named output node."""
