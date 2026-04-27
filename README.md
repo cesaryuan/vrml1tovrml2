@@ -78,6 +78,8 @@ wrl/
 - 目前优先覆盖主流 VRML 1.0/Open Inventor 风格节点，对一些非常少见的 SGI/Cosmo 专有扩展节点还没有完整补齐。
 - `MatrixTransform` 目前做的是常见仿射场景下的近似转换，重点保留平移和轴向缩放。
 - 复杂绑定、少见字段组合、历史兼容细节，仍建议拿你的真实 `.wrl` 样本继续回归补全。
+- 当前已经完成两阶段内存优化中的前两步：输入读取、tokenizer、输出写入都支持流式；`Material`、`Coordinate3`、`Normal`、`IndexedFaceSet`、`IndexedLineSet` 的大数组字段会优先落到临时 spool 文件而不是长期保存在 Python 大列表里。
+- 但转换器整体还没有做到完全“边解析边输出”，节点级 AST 和部分中间状态仍然会驻留内存，所以这还不是最终版的大文件方案。
 
 ## 代码说明
 

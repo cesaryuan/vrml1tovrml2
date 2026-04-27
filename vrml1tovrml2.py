@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import copy
 import io
+import os
 import logging
 import sys
+import tempfile
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,6 +21,40 @@ LOGGER = logging.getLogger("vrml1tovrml2")
 
 VRML1_HEADER = "#VRML V1.0 ascii"
 VRML2_HEADER = "#VRML V2.0 utf8"
+
+SPOOL_TARGET_FIELDS: set[tuple[str, str]] = {
+    ("Material", "ambientColor"),
+    ("Material", "diffuseColor"),
+    ("Material", "specularColor"),
+    ("Material", "emissiveColor"),
+    ("Material", "shininess"),
+    ("Material", "transparency"),
+    ("Coordinate3", "point"),
+    ("Normal", "vector"),
+    ("IndexedFaceSet", "coordIndex"),
+    ("IndexedFaceSet", "materialIndex"),
+    ("IndexedFaceSet", "normalIndex"),
+    ("IndexedFaceSet", "textureCoordIndex"),
+    ("IndexedLineSet", "coordIndex"),
+    ("IndexedLineSet", "materialIndex"),
+}
+
+_SPOOL_PATHS: set[str] = set()
+
+
+def _cleanup_spool_files() -> None:
+    """Remove temporary spool files created for large streamed field values."""
+
+    for path in list(_SPOOL_PATHS):
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            LOGGER.debug("Could not remove spool file %s during cleanup", path)
+
+
+atexit.register(_cleanup_spool_files)
 
 
 NODE_FIELD_SPECS: dict[str, dict[str, str]] = {
@@ -158,6 +195,92 @@ class UseRef:
 
 
 @dataclass(slots=True)
+class SpoolSequence:
+    """Represent a stream-backed immutable sequence stored on disk line by line."""
+
+    path: str
+    count: int
+    arity: int
+    scalar_type: str
+
+    def __iter__(self) -> Iterator[Any]:
+        """Yield sequence items from the backing spool file."""
+
+        with open(self.path, "r", encoding="utf-8") as handle:
+            for raw_line in handle:
+                line = raw_line.rstrip("\n")
+                if self.arity == 1:
+                    yield self._cast_scalar(line)
+                    continue
+                parts = line.split("\t")
+                yield tuple(self._cast_scalar(part) for part in parts)
+
+    def __len__(self) -> int:
+        """Return the known logical length without reading the spool file."""
+
+        return self.count
+
+    def first(self) -> Any:
+        """Return the first value from the spool sequence."""
+
+        for value in self:
+            return value
+        raise IndexError("SpoolSequence is empty")
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> "SpoolSequence":
+        """Reuse immutable spool-backed sequences across deep copies."""
+
+        memo[id(self)] = self
+        return self
+
+    def _cast_scalar(self, value: str) -> Any:
+        """Cast one stored scalar string back to its logical Python type."""
+
+        if self.scalar_type == "int":
+            return int(value)
+        if self.scalar_type == "float":
+            return float(value)
+        return value
+
+
+class SpoolSequenceBuilder:
+    """Write a large multi-value field to a temporary disk-backed sequence."""
+
+    def __init__(self, arity: int, scalar_type: str) -> None:
+        """Create a fresh temporary file used to accumulate sequence items."""
+
+        fd, path = tempfile.mkstemp(prefix="vrml1tovrml2_", suffix=".spool")
+        os.close(fd)
+        _SPOOL_PATHS.add(path)
+        self.path = path
+        self.arity = arity
+        self.scalar_type = scalar_type
+        self.count = 0
+        self.handle = open(path, "w", encoding="utf-8")
+
+    def append(self, value: Any) -> None:
+        """Append one scalar or tuple item to the spool file."""
+
+        if self.arity == 1:
+            self.handle.write(f"{value}\n")
+        else:
+            self.handle.write("\t".join(str(part) for part in value))
+            self.handle.write("\n")
+        self.count += 1
+
+    def finalize(self) -> SpoolSequence:
+        """Close the spool file and return its immutable read-side view."""
+
+        self.handle.close()
+        return SpoolSequence(
+            path=self.path,
+            count=self.count,
+            arity=self.arity,
+            scalar_type=self.scalar_type,
+        )
+
+
+@dataclass(slots=True)
 class DefinitionRef:
     """Represent a reusable value that should emit `DEF` once and `USE` afterwards."""
 
@@ -196,12 +319,12 @@ class TransformSpec:
 class MaterialState:
     """Store material values so geometry conversion can reuse them."""
 
-    ambient_colors: list[tuple[float, float, float]]
-    diffuse_colors: list[tuple[float, float, float]]
-    specular_colors: list[tuple[float, float, float]]
-    emissive_colors: list[tuple[float, float, float]]
-    shininess: list[float]
-    transparency: list[float]
+    ambient_colors: Any
+    diffuse_colors: Any
+    specular_colors: Any
+    emissive_colors: Any
+    shininess: Any
+    transparency: Any
     def_name: str | None = None
 
 
@@ -547,6 +670,7 @@ class VrmlParser:
     def _parse_field_value(self, node_type: str, field_name: str, field_kind: str) -> Any:
         """Parse one field value according to the node-specific field kind."""
 
+        spool_large_field = (node_type, field_name) in SPOOL_TARGET_FIELDS
         if field_kind == "bool":
             return self._parse_bool()
         if field_kind == "int":
@@ -568,15 +692,15 @@ class VrmlParser:
         if field_kind == "bitmask":
             return self._parse_bitmask(node_type)
         if field_kind == "mfint":
-            return self._parse_multi_numeric_values(1, cast=int)
+            return self._parse_multi_numeric_values(1, cast=int, spool=spool_large_field, scalar_type="int")
         if field_kind == "mffloat":
-            return self._parse_multi_numeric_values(1, cast=float)
+            return self._parse_multi_numeric_values(1, cast=float, spool=spool_large_field, scalar_type="float")
         if field_kind == "mfvec2":
-            return self._parse_multi_numeric_values(2, cast=float)
+            return self._parse_multi_numeric_values(2, cast=float, spool=spool_large_field, scalar_type="float")
         if field_kind == "mfvec3":
-            return self._parse_multi_numeric_values(3, cast=float)
+            return self._parse_multi_numeric_values(3, cast=float, spool=spool_large_field, scalar_type="float")
         if field_kind == "mfcolor":
-            return self._parse_multi_numeric_values(3, cast=float)
+            return self._parse_multi_numeric_values(3, cast=float, spool=spool_large_field, scalar_type="float")
         if field_kind == "mfstring":
             return self._parse_multi_strings()
         return self._parse_auto_value(field_name)
@@ -648,17 +772,30 @@ class VrmlParser:
             raise VrmlError(f"Expected string value at line {token.line}, column {token.column}")
         return [self._advance().value]
 
-    def _parse_multi_numeric_values(self, arity: int, cast: Any) -> list[Any]:
+    def _parse_multi_numeric_values(
+        self,
+        arity: int,
+        cast: Any,
+        spool: bool = False,
+        scalar_type: str = "float",
+    ) -> Any:
         """Parse a multi-value field either as one value or as a bracketed list."""
 
         if not self._check_symbol("["):
             single = self._parse_multi_value_item(arity, cast)
             return [single]
         values: list[Any] = []
+        builder = SpoolSequenceBuilder(arity, scalar_type) if spool else None
         self._consume_symbol("[", "Expected '['")
         while not self._check_symbol("]") and not self._at_end():
-            values.append(self._parse_multi_value_item(arity, cast))
+            item = self._parse_multi_value_item(arity, cast)
+            if builder is not None:
+                builder.append(item)
+            else:
+                values.append(item)
         self._consume_symbol("]", "Expected ']'")
+        if builder is not None:
+            return builder.finalize()
         return values
 
     def _parse_multi_value_item(self, arity: int, cast: Any) -> Any:
@@ -1046,13 +1183,13 @@ class VrmlConverter:
         if shape_hints.get("faceType") and shape_hints.get("faceType", "").upper() != "CONVEX":
             trailing_fields.append(("convex", False))
         trailing_fields.append(("creaseAngle", float(shape_hints.get("creaseAngle", 0.5))))
-        trailing_fields.append(("coordIndex", list(node.fields.get("coordIndex", []))))
+        trailing_fields.append(("coordIndex", self._clone_sequence(node.fields.get("coordIndex", []))))
         if color_index:
             trailing_fields.append(("colorIndex", color_index))
         if "normalIndex" in node.fields:
-            trailing_fields.append(("normalIndex", list(node.fields["normalIndex"])))
+            trailing_fields.append(("normalIndex", self._clone_sequence(node.fields["normalIndex"])))
         if "textureCoordIndex" in node.fields:
-            trailing_fields.append(("texCoordIndex", list(node.fields["textureCoordIndex"])))
+            trailing_fields.append(("texCoordIndex", self._clone_sequence(node.fields["textureCoordIndex"])))
         fields.extend(trailing_fields)
         return OutNode("IndexedFaceSet", fields=fields)
 
@@ -1068,7 +1205,7 @@ class VrmlConverter:
         material_binding = (state.material_binding or "OVERALL").upper()
         if material_binding in {"PER_FACE", "PER_FACE_INDEXED", "PER_PART", "PER_PART_INDEXED"}:
             fields.append(("colorPerVertex", False))
-        fields.append(("coordIndex", list(node.fields.get("coordIndex", []))))
+        fields.append(("coordIndex", self._clone_sequence(node.fields.get("coordIndex", []))))
         if color_index:
             fields.append(("colorIndex", color_index))
         return OutNode("IndexedLineSet", fields=fields)
@@ -1162,14 +1299,14 @@ class VrmlConverter:
         """Extract diffuse colors from the current material when they drive geometry color."""
 
         material = self._resolve_material(state.material, state)
-        if material is None or not material.diffuse_colors:
+        if material is None or self._sequence_length(material.diffuse_colors) == 0:
             return None, None
-        if len(material.diffuse_colors) == 1 and geometry_node.node_type not in {"IndexedLineSet", "PointSet"}:
+        if self._sequence_length(material.diffuse_colors) == 1 and geometry_node.node_type not in {"IndexedLineSet", "PointSet"}:
             return None, None
-        color_node = OutNode("Color", fields=[("color", list(material.diffuse_colors))])
+        color_node = OutNode("Color", fields=[("color", self._clone_sequence(material.diffuse_colors))])
         color_index = None
         if "materialIndex" in geometry_node.fields:
-            color_index = list(geometry_node.fields["materialIndex"])
+            color_index = self._materialize_list(geometry_node.fields["materialIndex"])
         return color_node, color_index
 
     def _convert_material_state(self, node: AstNode, state: ConversionState) -> MaterialState | UseRef:
@@ -1180,8 +1317,8 @@ class VrmlConverter:
             diffuse_colors=self._ensure_color_list(node.fields.get("diffuseColor", [(0.8, 0.8, 0.8)])),
             specular_colors=self._ensure_color_list(node.fields.get("specularColor", [(0.0, 0.0, 0.0)])),
             emissive_colors=self._ensure_color_list(node.fields.get("emissiveColor", [(0.0, 0.0, 0.0)])),
-            shininess=[float(value) for value in node.fields.get("shininess", [0.2])],
-            transparency=[float(value) for value in node.fields.get("transparency", [0.0])],
+            shininess=self._ensure_scalar_sequence(node.fields.get("shininess", [0.2]), float),
+            transparency=self._ensure_scalar_sequence(node.fields.get("transparency", [0.0]), float),
             def_name=node.def_name,
         )
         if node.def_name:
@@ -1191,22 +1328,30 @@ class VrmlConverter:
     def _material_to_out_node(self, material: MaterialState) -> OutNode:
         """Collapse one MaterialState into a VRML 2.0 Material node."""
 
-        diffuse = material.diffuse_colors[0]
-        ambient = material.ambient_colors[0] if material.ambient_colors else (0.2, 0.2, 0.2)
+        diffuse = self._first_item(material.diffuse_colors)
+        ambient = self._first_item(material.ambient_colors) if self._sequence_length(material.ambient_colors) else (0.2, 0.2, 0.2)
         ambient_intensity = max(0.0, min(1.0, sum(ambient) / 3.0))
         fields: list[tuple[str, Any]] = []
         if abs(ambient_intensity - 0.2) > 1e-9:
             fields.append(("ambientIntensity", ambient_intensity))
         if diffuse != (0.8, 0.8, 0.8):
             fields.append(("diffuseColor", diffuse))
-        if material.specular_colors and material.specular_colors[0] != (0.0, 0.0, 0.0):
-            fields.append(("specularColor", material.specular_colors[0]))
-        if material.emissive_colors and material.emissive_colors[0] != (0.0, 0.0, 0.0):
-            fields.append(("emissiveColor", material.emissive_colors[0]))
-        if material.shininess and abs(material.shininess[0] - 0.2) > 1e-9:
-            fields.append(("shininess", material.shininess[0]))
-        if material.transparency and abs(material.transparency[0] - 0.0) > 1e-9:
-            fields.append(("transparency", material.transparency[0]))
+        if self._sequence_length(material.specular_colors):
+            specular = self._first_item(material.specular_colors)
+            if specular != (0.0, 0.0, 0.0):
+                fields.append(("specularColor", specular))
+        if self._sequence_length(material.emissive_colors):
+            emissive = self._first_item(material.emissive_colors)
+            if emissive != (0.0, 0.0, 0.0):
+                fields.append(("emissiveColor", emissive))
+        if self._sequence_length(material.shininess):
+            shininess = self._first_item(material.shininess)
+            if abs(shininess - 0.2) > 1e-9:
+                fields.append(("shininess", shininess))
+        if self._sequence_length(material.transparency):
+            transparency = self._first_item(material.transparency)
+            if abs(transparency - 0.0) > 1e-9:
+                fields.append(("transparency", transparency))
         return OutNode("Material", fields=fields, def_name=material.def_name)
 
     def _material_reference_to_output(
@@ -1476,9 +1621,48 @@ class VrmlConverter:
     def _ensure_color_list(self, value: Any) -> list[tuple[float, float, float]]:
         """Normalize a color field to a list of RGB tuples."""
 
+        if isinstance(value, SpoolSequence):
+            return value
         if isinstance(value, list):
             return [tuple(map(float, item)) for item in value]
         return [tuple(map(float, value))]
+
+    def _ensure_scalar_sequence(self, value: Any, cast: Any) -> Any:
+        """Normalize scalar multi-fields while preserving spool-backed sequences."""
+
+        if isinstance(value, SpoolSequence):
+            return value
+        if isinstance(value, list):
+            return [cast(item) for item in value]
+        return [cast(value)]
+
+    def _clone_sequence(self, value: Any) -> Any:
+        """Clone a regular list but reuse immutable spool-backed sequences."""
+
+        if isinstance(value, SpoolSequence):
+            return value
+        return copy.deepcopy(value)
+
+    def _sequence_length(self, value: Any) -> int:
+        """Return the length of a normal or spool-backed logical sequence."""
+
+        if value is None:
+            return 0
+        return len(value)
+
+    def _first_item(self, value: Any) -> Any:
+        """Return the first item from a normal or spool-backed logical sequence."""
+
+        if isinstance(value, SpoolSequence):
+            return value.first()
+        return value[0]
+
+    def _materialize_list(self, value: Any) -> list[Any]:
+        """Materialize a logical sequence to a plain list when random access is needed."""
+
+        if isinstance(value, SpoolSequence):
+            return list(value)
+        return list(value)
 
     def _to_string_list(self, value: Any) -> list[str]:
         """Normalize a string-or-list field to a list of strings."""
@@ -1545,6 +1729,9 @@ class VrmlWriter:
                 lines.extend(rendered_item)
             lines.append(f"{prefix}]")
             return lines
+        if isinstance(value, SpoolSequence):
+            rendered = self._render_spool_sequence(value, indent + 2)
+            return [f"{prefix}{field_name} ["] + rendered + [f"{prefix}]"]
         if isinstance(value, list):
             rendered = self._render_list(value, indent + 2)
             return [f"{prefix}{field_name} ["] + rendered + [f"{prefix}]"]
@@ -1561,6 +1748,22 @@ class VrmlWriter:
             else:
                 line = f"{prefix}{self._render_scalar(value)}"
             if index < len(values) - 1:
+                line = f"{line},"
+            lines.append(line)
+        return lines
+
+    def _render_spool_sequence(self, values: SpoolSequence, indent: int) -> list[str]:
+        """Render a spool-backed large sequence without materializing it into a list."""
+
+        prefix = self._indent(indent)
+        lines: list[str] = []
+        last_index = len(values) - 1
+        for index, value in enumerate(values):
+            if isinstance(value, tuple):
+                line = f"{prefix}{' '.join(self._format_number(number) for number in value)}"
+            else:
+                line = f"{prefix}{self._render_scalar(value)}"
+            if index < last_index:
                 line = f"{line},"
             lines.append(line)
         return lines
