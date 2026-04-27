@@ -5,12 +5,13 @@ from __future__ import annotations
 
 import argparse
 import copy
+import io
 import logging
 import sys
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator, TextIO
 
 
 LOGGER = logging.getLogger("vrml1tovrml2")
@@ -244,159 +245,271 @@ class VrmlError(RuntimeError):
     """Describe a parse or conversion error with source context."""
 
 
+class CharReader:
+    """Read characters from a text stream incrementally with small lookahead."""
+
+    def __init__(self, stream: TextIO, chunk_size: int = 65536) -> None:
+        """Wrap a text stream that will be consumed incrementally."""
+
+        self.stream = stream
+        self.chunk_size = chunk_size
+        self.buffer = ""
+        self.index = 0
+        self.eof = False
+        self.line = 1
+        self.column = 1
+
+    def peek(self, offset: int = 0) -> str | None:
+        """Return the character at the current position plus offset."""
+
+        self._ensure(offset + 1)
+        position = self.index + offset
+        if position >= len(self.buffer):
+            return None
+        return self.buffer[position]
+
+    def advance(self) -> str | None:
+        """Consume one character and update line and column counters."""
+
+        self._ensure(1)
+        if self.index >= len(self.buffer):
+            return None
+        char = self.buffer[self.index]
+        self.index += 1
+        if char == "\n":
+            self.line += 1
+            self.column = 1
+        else:
+            self.column += 1
+        self._trim()
+        return char
+
+    def skip_line(self) -> None:
+        """Consume characters until the current line ends."""
+
+        while True:
+            char = self.peek()
+            if char is None or char == "\n":
+                return
+            self.advance()
+
+    def _ensure(self, needed: int) -> None:
+        """Ensure at least `needed` characters are buffered from the current index."""
+
+        while not self.eof and len(self.buffer) - self.index < needed:
+            chunk = self.stream.read(self.chunk_size)
+            if chunk == "":
+                self.eof = True
+                break
+            if self.index:
+                self.buffer = self.buffer[self.index :] + chunk
+                self.index = 0
+            else:
+                self.buffer += chunk
+
+    def _trim(self) -> None:
+        """Drop already-consumed prefix data so buffers do not grow unbounded."""
+
+        if self.index >= 32768:
+            self.buffer = self.buffer[self.index :]
+            self.index = 0
+
+
 class VrmlTokenizer:
     """Turn VRML 1.0 text into a stream of reusable tokens."""
 
-    def __init__(self, text: str) -> None:
-        """Store the source text that will be tokenized."""
+    def __init__(self, reader: CharReader) -> None:
+        """Store the character reader that will be tokenized."""
 
-        self.text = text
+        self.reader = reader
 
-    def tokenize(self) -> list[Token]:
-        """Tokenize the source text while skipping whitespace and comments."""
+    def tokenize(self) -> Iterator[Token]:
+        """Yield tokens lazily while skipping whitespace and comments."""
 
-        tokens: list[Token] = []
-        line = 1
-        column = 1
-        index = 0
-        length = len(self.text)
-        while index < length:
-            char = self.text[index]
+        while True:
+            char = self.reader.peek()
+            if char is None:
+                return
             if char == "\n":
-                line += 1
-                column = 1
-                index += 1
+                self.reader.advance()
                 continue
             if char in " \t\r,":
-                column += 1
-                index += 1
+                self.reader.advance()
                 continue
             if char == "#":
-                while index < length and self.text[index] != "\n":
-                    index += 1
+                self.reader.skip_line()
                 continue
+            line = self.reader.line
+            column = self.reader.column
             if char in "{}[]":
-                tokens.append(Token("symbol", char, line, column))
-                column += 1
-                index += 1
+                self.reader.advance()
+                yield Token("symbol", char, line, column)
                 continue
             if char == '"':
-                token, index, line, column = self._read_string(index, line, column)
-                tokens.append(token)
+                yield self._read_string(line, column)
                 continue
             if char.isdigit() or char in "+-.":
-                number_token, new_index = self._maybe_read_number(index, line, column)
+                number_token = self._maybe_read_number(line, column)
                 if number_token is not None:
-                    tokens.append(number_token)
-                    column += new_index - index
-                    index = new_index
+                    yield number_token
                     continue
-            token, index, column = self._read_identifier(index, line, column)
-            tokens.append(token)
-        return tokens
+            yield self._read_identifier(line, column)
 
-    def _read_string(
-        self, index: int, line: int, column: int
-    ) -> tuple[Token, int, int, int]:
+    def _read_string(self, line: int, column: int) -> Token:
         """Read one quoted VRML string token."""
 
         start_column = column
-        index += 1
-        column += 1
+        self.reader.advance()
         buffer: list[str] = []
-        while index < len(self.text):
-            char = self.text[index]
-            if char == "\\" and index + 1 < len(self.text):
-                escaped = self.text[index + 1]
+        while True:
+            char = self.reader.peek()
+            if char is None:
+                raise VrmlError(f"Unterminated string at line {line}, column {start_column}")
+            if char == "\\":
+                self.reader.advance()
+                escaped = self.reader.peek()
+                if escaped is None:
+                    raise VrmlError(f"Unterminated string at line {line}, column {start_column}")
                 escape_table = {"n": "\n", "t": "\t", '"': '"', "\\": "\\"}
                 buffer.append(escape_table.get(escaped, escaped))
-                index += 2
-                column += 2
+                self.reader.advance()
                 continue
             if char == '"':
-                index += 1
-                column += 1
-                return Token("string", "".join(buffer), line, start_column), index, line, column
-            if char == "\n":
-                line += 1
-                column = 1
-                index += 1
-                buffer.append("\n")
-                continue
+                self.reader.advance()
+                return Token("string", "".join(buffer), line, start_column)
             buffer.append(char)
-            index += 1
-            column += 1
-        raise VrmlError(f"Unterminated string at line {line}, column {start_column}")
+            self.reader.advance()
 
-    def _maybe_read_number(
-        self, index: int, line: int, column: int
-    ) -> tuple[Token | None, int]:
+    def _maybe_read_number(self, line: int, column: int) -> Token | None:
         """Read a numeric token when the current bytes match a VRML number."""
 
-        start = index
-        text = self.text
-        if text[index] in "+-":
-            index += 1
+        value_chars: list[str] = []
+        if self.reader.peek() in "+-":
+            value_chars.append(self.reader.advance() or "")
         has_digit = False
-        while index < len(text) and text[index].isdigit():
+        while True:
+            char = self.reader.peek()
+            if char is None or not char.isdigit():
+                break
             has_digit = True
-            index += 1
-        if index < len(text) and text[index] == ".":
-            index += 1
-            while index < len(text) and text[index].isdigit():
+            value_chars.append(self.reader.advance() or "")
+        if self.reader.peek() == ".":
+            value_chars.append(self.reader.advance() or "")
+            while True:
+                char = self.reader.peek()
+                if char is None or not char.isdigit():
+                    break
                 has_digit = True
-                index += 1
+                value_chars.append(self.reader.advance() or "")
         if not has_digit:
-            return None, start
-        if index < len(text) and text[index] in "eE":
-            exp_index = index + 1
-            if exp_index < len(text) and text[exp_index] in "+-":
-                exp_index += 1
+            for char in reversed(value_chars):
+                self.reader.index -= 1
+                if char == "\n":
+                    self.reader.line -= 1
+            self.reader.column -= len(value_chars)
+            return None
+        if self.reader.peek() in {"e", "E"}:
+            exponent_chars = [self.reader.advance() or ""]
+            if self.reader.peek() in {"+", "-"}:
+                exponent_chars.append(self.reader.advance() or "")
             exp_has_digit = False
-            while exp_index < len(text) and text[exp_index].isdigit():
+            while True:
+                char = self.reader.peek()
+                if char is None or not char.isdigit():
+                    break
                 exp_has_digit = True
-                exp_index += 1
+                exponent_chars.append(self.reader.advance() or "")
             if exp_has_digit:
-                index = exp_index
-        return Token("number", text[start:index], line, column), index
+                value_chars.extend(exponent_chars)
+            else:
+                for _ in exponent_chars:
+                    self.reader.index -= 1
+                self.reader.column -= len(exponent_chars)
+        return Token("number", "".join(value_chars), line, column)
 
-    def _read_identifier(self, index: int, line: int, column: int) -> tuple[Token, int, int]:
+    def _read_identifier(self, line: int, column: int) -> Token:
         """Read one identifier-like token until the next delimiter."""
 
-        start = index
-        while index < len(self.text) and self.text[index] not in " \t\r\n,{}[]\"#":
-            index += 1
-        value = self.text[start:index]
-        return Token("identifier", value, line, column), index, column + (index - start)
+        value_chars: list[str] = []
+        while True:
+            char = self.reader.peek()
+            if char is None or char in " \t\r\n,{}[]\"#":
+                break
+            value_chars.append(self.reader.advance() or "")
+        return Token("identifier", "".join(value_chars), line, column)
+
+
+class TokenBuffer:
+    """Provide small lookahead over a streaming token iterator."""
+
+    def __init__(self, tokens: Iterator[Token]) -> None:
+        """Store the streaming token iterator and an empty lookahead buffer."""
+
+        self.tokens = tokens
+        self.buffer: list[Token] = []
+        self.exhausted = False
+
+    def peek(self, offset: int = 0) -> Token:
+        """Return the token at the current position plus offset."""
+
+        self._ensure(offset + 1)
+        if offset >= len(self.buffer):
+            return Token("eof", "", -1, -1)
+        return self.buffer[offset]
+
+    def advance(self) -> Token:
+        """Consume and return the current token."""
+
+        self._ensure(1)
+        if not self.buffer:
+            return Token("eof", "", -1, -1)
+        return self.buffer.pop(0)
+
+    def at_end(self) -> bool:
+        """Return whether there are no more tokens available."""
+
+        self._ensure(1)
+        return not self.buffer
+
+    def _ensure(self, count: int) -> None:
+        """Fill the lookahead buffer up to the requested size when possible."""
+
+        while not self.exhausted and len(self.buffer) < count:
+            try:
+                self.buffer.append(next(self.tokens))
+            except StopIteration:
+                self.exhausted = True
+                break
+
+
+def validate_vrml1_header(reader: CharReader) -> None:
+    """Consume leading whitespace and verify the VRML 1.0 header."""
+
+    while reader.peek() is not None and (reader.peek() or "").isspace():
+        reader.advance()
+    for expected in VRML1_HEADER:
+        char = reader.advance()
+        if char != expected:
+            raise VrmlError("File does not have a valid VRML 1.0 header string")
 
 
 class VrmlParser:
     """Parse VRML 1.0 tokens into an abstract syntax tree."""
 
-    def __init__(self, text: str) -> None:
-        """Tokenize the provided source text and prepare parse state."""
+    def __init__(self, token_buffer: TokenBuffer) -> None:
+        """Store the streaming token buffer used by the parser."""
 
-        self.text = text
-        self.tokens = VrmlTokenizer(text).tokenize()
-        self.position = 0
+        self.tokens = token_buffer
 
     def parse(self) -> list[Any]:
         """Parse the full source file into a list of root statements."""
 
         LOGGER.info("Parsing VRML 1.0 source")
-        self._validate_header()
         statements: list[Any] = []
         while not self._at_end():
             statements.append(self._parse_statement())
         LOGGER.info("Parsed %d top-level statements", len(statements))
         return statements
-
-    def _validate_header(self) -> None:
-        """Ensure the input begins with the VRML 1.0 header expected by the tool."""
-
-        stripped = self.text.lstrip()
-        if not stripped.startswith(VRML1_HEADER):
-            raise VrmlError("File does not have a valid VRML 1.0 header string")
 
     def _parse_statement(self) -> Any:
         """Parse one statement, including DEF/USE wrappers."""
@@ -658,29 +771,23 @@ class VrmlParser:
     def _peek_next_symbol(self, value: str) -> bool:
         """Return whether the next token is the requested symbol."""
 
-        if self.position + 1 >= len(self.tokens):
-            return False
-        next_token = self.tokens[self.position + 1]
+        next_token = self.tokens.peek(1)
         return next_token.kind == "symbol" and next_token.value == value
 
     def _advance(self) -> Token:
         """Consume and return the current token."""
 
-        token = self.tokens[self.position]
-        self.position += 1
-        return token
+        return self.tokens.advance()
 
     def _peek(self) -> Token:
         """Return the current token or a synthetic EOF token."""
 
-        if self._at_end():
-            return Token("eof", "", -1, -1)
-        return self.tokens[self.position]
+        return self.tokens.peek(0)
 
     def _at_end(self) -> bool:
         """Return whether all tokens have already been consumed."""
 
-        return self.position >= len(self.tokens)
+        return self.tokens.at_end()
 
 
 class VrmlConverter:
@@ -1386,13 +1493,24 @@ class VrmlConverter:
 class VrmlWriter:
     """Serialize VRML 2.0 node trees into human-readable text."""
 
+    def write_to_stream(self, nodes: list[OutNode], stream: TextIO) -> None:
+        """Serialize the provided nodes directly to a text stream."""
+
+        LOGGER.info("Serializing VRML 2.0 output")
+        stream.write(VRML2_HEADER)
+        stream.write("\n\n")
+        for index, node in enumerate(nodes):
+            if index:
+                stream.write("\n\n")
+            stream.write(self._render_node(node, 0))
+        stream.write("\n")
+
     def write(self, nodes: list[OutNode]) -> str:
         """Serialize the provided nodes into a full VRML 2.0 document."""
 
-        LOGGER.info("Serializing VRML 2.0 output")
-        blocks = [VRML2_HEADER]
-        blocks.extend(self._render_node(node, 0) for node in nodes)
-        return "\n\n".join(blocks).rstrip() + "\n"
+        output = io.StringIO()
+        self.write_to_stream(nodes, output)
+        return output.getvalue()
 
     def _render_node(self, node: OutNode | UseRef, indent: int) -> str:
         """Render one node reference or full node definition."""
@@ -1471,15 +1589,26 @@ class VrmlWriter:
         return "\t" * (indent // 2)
 
 
-def convert_vrml1_text(text: str) -> str:
-    """Convert VRML 1.0 source text into VRML 2.0 source text."""
+def convert_vrml1_stream(input_stream: TextIO, output_stream: TextIO) -> None:
+    """Convert VRML 1.0 source read from one stream into VRML 2.0 on another."""
 
-    parser = VrmlParser(text)
+    reader = CharReader(input_stream)
+    validate_vrml1_header(reader)
+    token_buffer = TokenBuffer(VrmlTokenizer(reader).tokenize())
+    parser = VrmlParser(token_buffer)
     ast = parser.parse()
     converter = VrmlConverter()
     out_nodes = converter.convert(ast)
     writer = VrmlWriter()
-    return writer.write(out_nodes)
+    writer.write_to_stream(out_nodes, output_stream)
+
+
+def convert_vrml1_text(text: str) -> str:
+    """Convert VRML 1.0 source text into VRML 2.0 source text."""
+
+    output = io.StringIO()
+    convert_vrml1_stream(io.StringIO(text), output)
+    return output.getvalue()
 
 
 def configure_logging(verbose: bool) -> None:
@@ -1511,13 +1640,15 @@ def main(argv: Iterable[str] | None = None) -> int:
         LOGGER.error("Invalid input file name specified: %s", input_path)
         return 1
     LOGGER.info("Reading input file %s", input_path)
-    vrml2_text = convert_vrml1_text(input_path.read_text(encoding="utf-8"))
     if args.output:
         output_path = Path(args.output)
         LOGGER.info("Writing output file %s", output_path)
-        output_path.write_text(vrml2_text, encoding="utf-8")
+        with input_path.open("r", encoding="utf-8", errors="strict") as input_stream:
+            with output_path.open("w", encoding="utf-8") as output_stream:
+                convert_vrml1_stream(input_stream, output_stream)
     else:
-        sys.stdout.write(vrml2_text)
+        with input_path.open("r", encoding="utf-8", errors="strict") as input_stream:
+            convert_vrml1_stream(input_stream, sys.stdout)
     return 0
 
 
