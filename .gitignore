@@ -3,3 +3,4 @@ vr1tovr2_v2.2
 __pycache__/
 /test.wrl
 target/
+.codex
