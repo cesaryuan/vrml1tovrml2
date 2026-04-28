@@ -1,177 +1,374 @@
 //! Streaming tokenizer and parser for a Rust VRML 1.0 implementation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
+use std::io::{Cursor, Read};
 
 use crate::error::VrmlError;
-use crate::model::{AstNode, FieldKind, Statement, Token, TokenKind, UseRef, Value};
+use crate::model::{AstNode, FieldKind, OutNode, Statement, Token, TokenKind, UseRef, Value};
 
 const VRML1_HEADER: &str = "#VRML V1.0 ascii";
 
-/// Parse a VRML 1.0 document into statements.
+/// Parse a VRML 1.0 document from an in-memory string.
+#[allow(dead_code)]
 pub fn parse_vrml(input: &str) -> Result<Vec<Statement>, VrmlError> {
-    validate_vrml1_header(input)?;
-    let tokens = tokenize(input)?;
-    let mut parser = Parser::new(tokens);
+    parse_vrml_reader(Cursor::new(input.as_bytes()))
+}
+
+/// Parse a VRML 1.0 document from any readable byte stream.
+pub fn parse_vrml_reader<R: Read>(reader: R) -> Result<Vec<Statement>, VrmlError> {
+    let mut char_reader = CharReader::new(reader);
+    validate_vrml1_header(&mut char_reader)?;
+    let tokenizer = VrmlTokenizer::new(char_reader);
+    let token_buffer = TokenBuffer::new(tokenizer);
+    let mut parser = Parser::new(token_buffer);
     parser.parse()
 }
 
-/// Verify that the source begins with the expected VRML 1.0 header.
-fn validate_vrml1_header(input: &str) -> Result<(), VrmlError> {
-    let trimmed = input.trim_start();
-    if trimmed.starts_with(VRML1_HEADER) {
-        return Ok(());
-    }
-    Err(VrmlError::from(
-        "File does not have a valid VRML 1.0 header string",
-    ))
+/// Read characters from an input stream with a bounded rolling buffer.
+struct CharReader<R: Read> {
+    /// Underlying byte source.
+    reader: R,
+    /// Number of bytes requested per chunk refill.
+    chunk_size: usize,
+    /// Rolling text buffer.
+    buffer: String,
+    /// Current byte offset inside the rolling buffer.
+    index: usize,
+    /// Whether the source has been fully consumed.
+    eof: bool,
+    /// Current 1-based source line.
+    line: usize,
+    /// Current 1-based source column.
+    column: usize,
 }
 
-/// Tokenize the VRML 1.0 source into parser-ready tokens.
-fn tokenize(input: &str) -> Result<Vec<Token>, VrmlError> {
-    let mut tokens = Vec::new();
-    let bytes = input.as_bytes();
-    let mut index = 0usize;
-    let mut line = 1usize;
-    let mut column = 1usize;
+impl<R: Read> CharReader<R> {
+    /// Create a character reader over any readable source.
+    fn new(reader: R) -> Self {
+        Self {
+            reader,
+            chunk_size: 64 * 1024,
+            buffer: String::new(),
+            index: 0,
+            eof: false,
+            line: 1,
+            column: 1,
+        }
+    }
 
-    while index < bytes.len() {
-        let char = bytes[index] as char;
-        if char == '\n' {
-            index += 1;
-            line += 1;
-            column = 1;
-            continue;
+    /// Return the next character without consuming it.
+    fn peek(&mut self, offset: usize) -> Result<Option<char>, VrmlError> {
+        self.ensure(offset + 1)?;
+        let position = self.index + offset;
+        if position >= self.buffer.len() {
+            return Ok(None);
         }
-        if matches!(char, ' ' | '\t' | '\r' | ',') {
-            index += 1;
-            column += 1;
-            continue;
+        Ok(self.buffer.as_bytes().get(position).map(|byte| *byte as char))
+    }
+
+    /// Consume and return the next character.
+    fn advance(&mut self) -> Result<Option<char>, VrmlError> {
+        self.ensure(1)?;
+        if self.index >= self.buffer.len() {
+            return Ok(None);
         }
-        if char == '#' {
-            while index < bytes.len() && bytes[index] as char != '\n' {
-                index += 1;
-                column += 1;
+
+        let character = self.buffer.as_bytes()[self.index] as char;
+        self.index += 1;
+        if character == '\n' {
+            self.line += 1;
+            self.column = 1;
+        } else {
+            self.column += 1;
+        }
+        self.trim();
+        Ok(Some(character))
+    }
+
+    /// Consume characters until the current line ends.
+    fn skip_line(&mut self) -> Result<(), VrmlError> {
+        while let Some(character) = self.peek(0)? {
+            if character == '\n' {
+                break;
             }
+            self.advance()?;
+        }
+        Ok(())
+    }
+
+    /// Refill the rolling buffer so at least `needed` characters are available.
+    fn ensure(&mut self, needed: usize) -> Result<(), VrmlError> {
+        while !self.eof && self.buffer.len().saturating_sub(self.index) < needed {
+            let mut chunk = vec![0u8; self.chunk_size];
+            let read = self.reader.read(&mut chunk)?;
+            if read == 0 {
+                self.eof = true;
+                break;
+            }
+            chunk.truncate(read);
+            let text = String::from_utf8(chunk).map_err(|error| {
+                VrmlError::from(format!("Input is not valid UTF-8/ASCII VRML text: {error}"))
+            })?;
+
+            if self.index > 0 {
+                let remainder = self.buffer.split_off(self.index);
+                self.buffer = remainder;
+                self.index = 0;
+            }
+            self.buffer.push_str(&text);
+        }
+        Ok(())
+    }
+
+    /// Drop already-consumed text so the rolling buffer stays bounded.
+    fn trim(&mut self) {
+        if self.index >= 32 * 1024 {
+            let remainder = self.buffer.split_off(self.index);
+            self.buffer = remainder;
+            self.index = 0;
+        }
+    }
+}
+
+/// Verify that the source begins with the expected VRML 1.0 header.
+fn validate_vrml1_header<R: Read>(reader: &mut CharReader<R>) -> Result<(), VrmlError> {
+    while matches!(reader.peek(0)?, Some(character) if character.is_whitespace()) {
+        reader.advance()?;
+    }
+    for expected in VRML1_HEADER.chars() {
+        let actual = reader.advance()?;
+        if actual != Some(expected) {
+            return Err(VrmlError::from(
+                "File does not have a valid VRML 1.0 header string",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Turn VRML text into a token stream while reading incrementally.
+struct VrmlTokenizer<R: Read> {
+    /// Character reader consumed by the tokenizer.
+    reader: CharReader<R>,
+}
+
+impl<R: Read> VrmlTokenizer<R> {
+    /// Create a tokenizer over a character reader.
+    fn new(reader: CharReader<R>) -> Self {
+        Self { reader }
+    }
+}
+
+impl<R: Read> Iterator for VrmlTokenizer<R> {
+    type Item = Result<Token, VrmlError>;
+
+    /// Yield the next lexical token from the stream.
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let character = match self.reader.peek(0) {
+                Ok(value) => value,
+                Err(error) => return Some(Err(error)),
+            }?;
+
+            if character == '\n' || matches!(character, ' ' | '\t' | '\r' | ',') {
+                if let Err(error) = self.reader.advance() {
+                    return Some(Err(error));
+                }
+                continue;
+            }
+
+            if character == '#' {
+                if let Err(error) = self.reader.skip_line() {
+                    return Some(Err(error));
+                }
+                continue;
+            }
+
+            let line = self.reader.line;
+            let column = self.reader.column;
+
+            if matches!(character, '{' | '}' | '[' | ']') {
+                if let Err(error) = self.reader.advance() {
+                    return Some(Err(error));
+                }
+                return Some(Ok(Token {
+                    kind: TokenKind::Symbol,
+                    value: character.to_string(),
+                    line,
+                    column,
+                }));
+            }
+
+            if character == '"' {
+                return Some(read_string(&mut self.reader, line, column));
+            }
+
+            return Some(read_identifier_or_number(&mut self.reader, line, column));
+        }
+    }
+}
+
+/// Read one quoted string token.
+fn read_string<R: Read>(
+    reader: &mut CharReader<R>,
+    line: usize,
+    column: usize,
+) -> Result<Token, VrmlError> {
+    reader.advance()?;
+    let mut buffer = String::new();
+
+    loop {
+        let Some(character) = reader.peek(0)? else {
+            return Err(VrmlError::from(format!(
+                "Unterminated string at line {line}, column {column}"
+            )));
+        };
+
+        if character == '\\' {
+            reader.advance()?;
+            let Some(escaped) = reader.peek(0)? else {
+                return Err(VrmlError::from(format!(
+                    "Unterminated string at line {line}, column {column}"
+                )));
+            };
+            let mapped = match escaped {
+                'n' => '\n',
+                't' => '\t',
+                '"' => '"',
+                '\\' => '\\',
+                other => other,
+            };
+            buffer.push(mapped);
+            reader.advance()?;
             continue;
         }
-        if matches!(char, '{' | '}' | '[' | ']') {
-            tokens.push(Token {
-                kind: TokenKind::Symbol,
-                value: char.to_string(),
+
+        if character == '"' {
+            reader.advance()?;
+            return Ok(Token {
+                kind: TokenKind::String,
+                value: buffer,
                 line,
                 column,
             });
-            index += 1;
-            column += 1;
-            continue;
-        }
-        if char == '"' {
-            let start_line = line;
-            let start_column = column;
-            index += 1;
-            column += 1;
-            let mut value = String::new();
-            while index < bytes.len() {
-                let current = bytes[index] as char;
-                if current == '"' {
-                    index += 1;
-                    column += 1;
-                    break;
-                }
-                if current == '\\' {
-                    index += 1;
-                    column += 1;
-                    if index >= bytes.len() {
-                        return Err(VrmlError::from(format!(
-                            "Unterminated string at line {start_line}, column {start_column}"
-                        )));
-                    }
-                    let escaped = bytes[index] as char;
-                    let mapped = match escaped {
-                        'n' => '\n',
-                        't' => '\t',
-                        '"' => '"',
-                        '\\' => '\\',
-                        other => other,
-                    };
-                    value.push(mapped);
-                    index += 1;
-                    column += 1;
-                    continue;
-                }
-                value.push(current);
-                index += 1;
-                column += 1;
-            }
-            tokens.push(Token {
-                kind: TokenKind::String,
-                value,
-                line: start_line,
-                column: start_column,
-            });
-            continue;
         }
 
-        let start = index;
-        let start_line = line;
-        let start_column = column;
-        while index < bytes.len() {
-            let current = bytes[index] as char;
-            if matches!(
-                current,
-                ' ' | '\t' | '\r' | '\n' | ',' | '{' | '}' | '[' | ']' | '"' | '#'
-            ) {
-                break;
-            }
-            index += 1;
-            column += 1;
-        }
-        let value = &input[start..index];
-        let kind = if looks_like_number(value) {
-            TokenKind::Number
-        } else {
-            TokenKind::Identifier
-        };
-        tokens.push(Token {
-            kind,
-            value: value.to_owned(),
-            line: start_line,
-            column: start_column,
-        });
+        buffer.push(character);
+        reader.advance()?;
     }
-
-    tokens.push(Token {
-        kind: TokenKind::Eof,
-        value: String::new(),
-        line,
-        column,
-    });
-    Ok(tokens)
 }
 
-/// Return whether a token text should be treated as numeric.
-fn looks_like_number(value: &str) -> bool {
-    value.parse::<f64>().is_ok()
+/// Read one identifier-like token and classify it as identifier or number.
+fn read_identifier_or_number<R: Read>(
+    reader: &mut CharReader<R>,
+    line: usize,
+    column: usize,
+) -> Result<Token, VrmlError> {
+    let mut buffer = String::new();
+    while let Some(character) = reader.peek(0)? {
+        if is_delimiter(character) {
+            break;
+        }
+        buffer.push(character);
+        reader.advance()?;
+    }
+
+    let kind = if buffer.parse::<f64>().is_ok() {
+        TokenKind::Number
+    } else {
+        TokenKind::Identifier
+    };
+
+    Ok(Token {
+        kind,
+        value: buffer,
+        line,
+        column,
+    })
+}
+
+/// Return whether a character ends the current token.
+fn is_delimiter(character: char) -> bool {
+    matches!(
+        character,
+        ' ' | '\t' | '\r' | '\n' | ',' | '{' | '}' | '[' | ']' | '"' | '#'
+    )
+}
+
+/// Provide bounded lookahead over a streaming token iterator.
+struct TokenBuffer<I: Iterator<Item = Result<Token, VrmlError>>> {
+    /// Streaming source of tokens.
+    tokens: I,
+    /// Buffered lookahead window.
+    buffer: VecDeque<Token>,
+    /// Whether the underlying iterator is exhausted.
+    exhausted: bool,
+}
+
+impl<I: Iterator<Item = Result<Token, VrmlError>>> TokenBuffer<I> {
+    /// Create an empty lookahead buffer over a token iterator.
+    fn new(tokens: I) -> Self {
+        Self {
+            tokens,
+            buffer: VecDeque::new(),
+            exhausted: false,
+        }
+    }
+
+    /// Return the token at the current position plus an offset.
+    fn peek(&mut self, offset: usize) -> Result<Token, VrmlError> {
+        self.ensure(offset + 1)?;
+        Ok(self.buffer.get(offset).cloned().unwrap_or(Token {
+            kind: TokenKind::Eof,
+            value: String::new(),
+            line: 0,
+            column: 0,
+        }))
+    }
+
+    /// Consume and return the current token.
+    fn advance(&mut self) -> Result<Token, VrmlError> {
+        self.ensure(1)?;
+        Ok(self.buffer.pop_front().unwrap_or(Token {
+            kind: TokenKind::Eof,
+            value: String::new(),
+            line: 0,
+            column: 0,
+        }))
+    }
+
+    /// Fill the lookahead window up to the requested size.
+    fn ensure(&mut self, count: usize) -> Result<(), VrmlError> {
+        while !self.exhausted && self.buffer.len() < count {
+            match self.tokens.next() {
+                Some(Ok(token)) => self.buffer.push_back(token),
+                Some(Err(error)) => return Err(error),
+                None => {
+                    self.exhausted = true;
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Parse VRML tokens into a tree of statements.
-struct Parser {
-    /// Hold the token stream in memory for simple lookahead.
-    tokens: Vec<Token>,
-    /// Track the current read position.
-    index: usize,
+struct Parser<I: Iterator<Item = Result<Token, VrmlError>>> {
+    /// Token lookahead buffer used by the parser.
+    tokens: TokenBuffer<I>,
 }
 
-impl Parser {
-    /// Create a parser over an owned token vector.
-    fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, index: 0 }
+impl<I: Iterator<Item = Result<Token, VrmlError>>> Parser<I> {
+    /// Create a parser over a token buffer.
+    fn new(tokens: TokenBuffer<I>) -> Self {
+        Self { tokens }
     }
 
     /// Parse the full token stream into top-level statements.
     fn parse(&mut self) -> Result<Vec<Statement>, VrmlError> {
         let mut statements = Vec::new();
-        while !self.at_end() {
+        while !self.at_end()? {
             statements.push(self.parse_statement()?);
         }
         Ok(statements)
@@ -179,43 +376,50 @@ impl Parser {
 
     /// Parse one statement, including `DEF` and `USE` forms.
     fn parse_statement(&mut self) -> Result<Statement, VrmlError> {
-        if self.match_identifier("DEF") {
-            let def_name = self.consume(TokenKind::Identifier, "Expected name after DEF")?.value;
+        if self.match_identifier("DEF")? {
+            let def_name = self
+                .consume(TokenKind::Identifier, "Expected name after DEF")?
+                .value;
             let mut node = match self.parse_statement()? {
                 Statement::Node(node) => node,
                 Statement::Use(_) => {
-                    return Err(VrmlError::from(format!("DEF {def_name} must target a node")))
+                    return Err(VrmlError::from(format!(
+                        "DEF {def_name} must target a node"
+                    )))
                 }
             };
             node.def_name = Some(def_name);
             return Ok(Statement::Node(node));
         }
-        if self.match_identifier("USE") {
+
+        if self.match_identifier("USE")? {
             let name = self
                 .consume(TokenKind::Identifier, "Expected name after USE")?
                 .value;
             return Ok(Statement::Use(UseRef { name }));
         }
+
         self.parse_node().map(Statement::Node)
     }
 
     /// Parse one node with fields and child statements.
     fn parse_node(&mut self) -> Result<AstNode, VrmlError> {
-        let node_type = self
-            .consume(TokenKind::Identifier, "Expected node type")?
-            .value;
+        let node_type = self.consume(TokenKind::Identifier, "Expected node type")?.value;
         self.consume_symbol("{", &format!("Expected '{{' after node type {node_type}"))?;
 
         let mut fields = BTreeMap::new();
         let mut children = Vec::new();
 
-        while !self.check_symbol("}") && !self.at_end() {
-            if self.looks_like_statement() {
+        while !self.check_symbol("}")? && !self.at_end()? {
+            if self.looks_like_statement()? {
                 children.push(self.parse_statement()?);
                 continue;
             }
             let field_name = self
-                .consume(TokenKind::Identifier, &format!("Expected field name in {node_type}"))?
+                .consume(
+                    TokenKind::Identifier,
+                    &format!("Expected field name in {node_type}"),
+                )?
                 .value;
             let field_kind = field_kind(&node_type, &field_name);
             let value = self.parse_field_value(&node_type, &field_name, field_kind)?;
@@ -242,8 +446,12 @@ impl Parser {
             FieldKind::Bool => self.parse_bool(),
             FieldKind::Int => Ok(Value::Int(self.parse_int("Expected integer")?)),
             FieldKind::Float => Ok(Value::Float(self.parse_float("Expected float")?)),
-            FieldKind::Vec2 => Ok(Value::Vec(self.parse_fixed_vector(2, "Expected numeric vector value")?)),
-            FieldKind::Vec3 => Ok(Value::Vec(self.parse_fixed_vector(3, "Expected numeric vector value")?)),
+            FieldKind::Vec2 => Ok(Value::Vec(
+                self.parse_fixed_vector(2, "Expected numeric vector value")?,
+            )),
+            FieldKind::Vec3 => Ok(Value::Vec(
+                self.parse_fixed_vector(3, "Expected numeric vector value")?,
+            )),
             FieldKind::Rotation => Ok(Value::Vec(
                 self.parse_fixed_vector(4, "Expected numeric rotation value")?,
             )),
@@ -252,7 +460,10 @@ impl Parser {
             FieldKind::MfVec3 => self.parse_multi_numeric_values(3, true),
             FieldKind::MfString => self.parse_multi_strings(),
             FieldKind::Enum => {
-                let token = self.consume(TokenKind::Identifier, &format!("Expected enum value for {field_name}"))?;
+                let token = self.consume(
+                    TokenKind::Identifier,
+                    &format!("Expected enum value for {field_name}"),
+                )?;
                 Ok(Value::Identifier(token.value))
             }
             FieldKind::Auto => self.parse_auto_value(node_type, field_name),
@@ -260,50 +471,61 @@ impl Parser {
     }
 
     /// Parse a best-effort value form for less structured fields.
-    fn parse_auto_value(&mut self, _node_type: &str, field_name: &str) -> Result<Value, VrmlError> {
-        if self.match_identifier("DEF") {
-            let def_name = self.consume(TokenKind::Identifier, "Expected name after DEF")?.value;
+    fn parse_auto_value(
+        &mut self,
+        _node_type: &str,
+        field_name: &str,
+    ) -> Result<Value, VrmlError> {
+        if self.match_identifier("DEF")? {
+            let def_name = self
+                .consume(TokenKind::Identifier, "Expected name after DEF")?
+                .value;
             return match self.parse_statement()? {
                 Statement::Node(mut node) => {
                     node.def_name = Some(def_name);
                     Ok(Value::Node(Box::new(convert_ast_node_to_out_node(node)?)))
                 }
                 Statement::Use(_) => {
-                    return Err(VrmlError::from(format!("DEF {def_name} must target a node")))
+                    Err(VrmlError::from(format!("DEF {def_name} must target a node")))
                 }
             };
         }
-        if self.match_identifier("USE") {
+
+        if self.match_identifier("USE")? {
             let name = self
                 .consume(TokenKind::Identifier, "Expected name after USE")?
                 .value;
             return Ok(Value::Use(UseRef { name }));
         }
-        if self.check_symbol("[") {
+
+        if self.check_symbol("[")? {
             return self.parse_list();
         }
-        let token = self.peek().clone();
+
+        let token = self.peek()?;
         match token.kind {
             TokenKind::String => {
-                self.advance();
+                self.advance()?;
                 Ok(Value::String(token.value))
             }
             TokenKind::Number => {
-                self.advance();
+                self.advance()?;
                 let number = token.value.parse::<f64>().map_err(|error| {
                     VrmlError::from(format!("Invalid numeric value {}: {error}", token.value))
                 })?;
                 Ok(Value::Float(number))
             }
             TokenKind::Identifier => {
-                if self.peek_next_symbol("{") {
+                if self.peek_next_symbol("{")? {
                     let nested = self.parse_statement()?;
                     return match nested {
-                        Statement::Node(node) => Ok(Value::Node(Box::new(convert_ast_node_to_out_node(node)?))),
+                        Statement::Node(node) => {
+                            Ok(Value::Node(Box::new(convert_ast_node_to_out_node(node)?)))
+                        }
                         Statement::Use(use_ref) => Ok(Value::Use(use_ref)),
                     };
                 }
-                self.advance();
+                self.advance()?;
                 Ok(Value::Identifier(token.value))
             }
             _ => Err(VrmlError::from(format!(
@@ -317,28 +539,35 @@ impl Parser {
     fn parse_list(&mut self) -> Result<Value, VrmlError> {
         self.consume_symbol("[", "Expected '['")?;
         let mut values = Vec::new();
-        while !self.check_symbol("]") && !self.at_end() {
-            if self.looks_like_statement() {
+        while !self.check_symbol("]")? && !self.at_end()? {
+            if self.looks_like_statement()? {
                 match self.parse_statement()? {
-                    Statement::Node(node) => values.push(Value::Node(Box::new(convert_ast_node_to_out_node(node)?))),
+                    Statement::Node(node) => {
+                        values.push(Value::Node(Box::new(convert_ast_node_to_out_node(node)?)))
+                    }
                     Statement::Use(use_ref) => values.push(Value::Use(use_ref)),
                 }
                 continue;
             }
-            let token = self.peek().clone();
+            let token = self.peek()?;
             match token.kind {
                 TokenKind::String => {
-                    self.advance();
+                    self.advance()?;
                     values.push(Value::String(token.value));
                 }
                 TokenKind::Number => {
-                    self.advance();
-                    values.push(Value::Float(token.value.parse::<f64>().map_err(|error| {
-                        VrmlError::from(format!("Invalid numeric value {}: {error}", token.value))
-                    })?));
+                    self.advance()?;
+                    values.push(Value::Float(token.value.parse::<f64>().map_err(
+                        |error| {
+                            VrmlError::from(format!(
+                                "Invalid numeric value {}: {error}",
+                                token.value
+                            ))
+                        },
+                    )?));
                 }
                 TokenKind::Identifier => {
-                    self.advance();
+                    self.advance()?;
                     values.push(Value::Identifier(token.value));
                 }
                 _ => return Err(VrmlError::from("Unsupported list value")),
@@ -361,19 +590,17 @@ impl Parser {
     /// Parse one integer token.
     fn parse_int(&mut self, message: &str) -> Result<i32, VrmlError> {
         let token = self.consume(TokenKind::Number, message)?;
-        token
-            .value
-            .parse::<i32>()
-            .map_err(|error| VrmlError::from(format!("Invalid integer value {}: {error}", token.value)))
+        token.value.parse::<i32>().map_err(|error| {
+            VrmlError::from(format!("Invalid integer value {}: {error}", token.value))
+        })
     }
 
     /// Parse one float token.
     fn parse_float(&mut self, message: &str) -> Result<f64, VrmlError> {
         let token = self.consume(TokenKind::Number, message)?;
-        token
-            .value
-            .parse::<f64>()
-            .map_err(|error| VrmlError::from(format!("Invalid float value {}: {error}", token.value)))
+        token.value.parse::<f64>().map_err(|error| {
+            VrmlError::from(format!("Invalid float value {}: {error}", token.value))
+        })
     }
 
     /// Parse a fixed-width numeric vector.
@@ -391,13 +618,13 @@ impl Parser {
         arity: usize,
         floats: bool,
     ) -> Result<Value, VrmlError> {
-        if !self.check_symbol("[") {
+        if !self.check_symbol("[")? {
             return self.parse_multi_numeric_item(arity, floats);
         }
 
         self.consume_symbol("[", "Expected '['")?;
         let mut values = Vec::new();
-        while !self.check_symbol("]") && !self.at_end() {
+        while !self.check_symbol("]")? && !self.at_end()? {
             values.push(self.parse_multi_numeric_item(arity, floats)?);
         }
         self.consume_symbol("]", "Expected ']'")?;
@@ -405,7 +632,11 @@ impl Parser {
     }
 
     /// Parse one numeric item from a multi-value field.
-    fn parse_multi_numeric_item(&mut self, arity: usize, floats: bool) -> Result<Value, VrmlError> {
+    fn parse_multi_numeric_item(
+        &mut self,
+        arity: usize,
+        floats: bool,
+    ) -> Result<Value, VrmlError> {
         if arity == 1 {
             return if floats {
                 Ok(Value::Float(self.parse_float("Expected numeric value")?))
@@ -422,40 +653,40 @@ impl Parser {
     /// Parse one or more string values, optionally bracketed.
     fn parse_multi_strings(&mut self) -> Result<Value, VrmlError> {
         let mut values = Vec::new();
-        if self.check_symbol("[") {
+        if self.check_symbol("[")? {
             self.consume_symbol("[", "Expected '['")?;
-            while !self.check_symbol("]") && !self.at_end() {
-                let token = self.peek().clone();
+            while !self.check_symbol("]")? && !self.at_end()? {
+                let token = self.peek()?;
                 if !matches!(token.kind, TokenKind::String | TokenKind::Identifier) {
                     return Err(VrmlError::from(format!(
                         "Expected string value at line {}, column {}",
                         token.line, token.column
                     )));
                 }
-                self.advance();
+                self.advance()?;
                 values.push(Value::String(token.value));
             }
             self.consume_symbol("]", "Expected ']'")?;
             return Ok(Value::List(values));
         }
 
-        let token = self.peek().clone();
+        let token = self.peek()?;
         if !matches!(token.kind, TokenKind::String | TokenKind::Identifier) {
             return Err(VrmlError::from(format!(
                 "Expected string value at line {}, column {}",
                 token.line, token.column
             )));
         }
-        self.advance();
+        self.advance()?;
         Ok(Value::List(vec![Value::String(token.value)]))
     }
 
     /// Consume one token of the expected kind.
     fn consume(&mut self, expected: TokenKind, message: &str) -> Result<Token, VrmlError> {
-        if self.peek().kind == expected {
-            return Ok(self.advance());
+        let token = self.peek()?;
+        if token.kind == expected {
+            return self.advance();
         }
-        let token = self.peek();
         Err(VrmlError::from(format!(
             "{message} at line {}, column {}",
             token.line, token.column
@@ -464,11 +695,11 @@ impl Parser {
 
     /// Consume one symbol token with the expected text.
     fn consume_symbol(&mut self, symbol: &str, message: &str) -> Result<(), VrmlError> {
-        if self.check_symbol(symbol) {
-            self.advance();
+        let token = self.peek()?;
+        if token.kind == TokenKind::Symbol && token.value == symbol {
+            self.advance()?;
             return Ok(());
         }
-        let token = self.peek();
         Err(VrmlError::from(format!(
             "{message} at line {}, column {}",
             token.line, token.column
@@ -476,63 +707,53 @@ impl Parser {
     }
 
     /// Match one identifier token with the expected value.
-    fn match_identifier(&mut self, value: &str) -> bool {
-        if self.peek().kind == TokenKind::Identifier && self.peek().value == value {
-            self.advance();
-            return true;
+    fn match_identifier(&mut self, value: &str) -> Result<bool, VrmlError> {
+        let token = self.peek()?;
+        if token.kind == TokenKind::Identifier && token.value == value {
+            self.advance()?;
+            return Ok(true);
         }
-        false
+        Ok(false)
     }
 
     /// Return whether the next token closes a node or list.
-    fn check_symbol(&self, symbol: &str) -> bool {
-        self.peek().kind == TokenKind::Symbol && self.peek().value == symbol
+    fn check_symbol(&mut self, symbol: &str) -> Result<bool, VrmlError> {
+        let token = self.peek()?;
+        Ok(token.kind == TokenKind::Symbol && token.value == symbol)
     }
 
     /// Return whether the current token sequence looks like a child statement.
-    fn looks_like_statement(&self) -> bool {
-        self.peek_value("DEF")
-            || self.peek_value("USE")
-            || (self.peek().kind == TokenKind::Identifier && self.peek_next_symbol("{"))
+    fn looks_like_statement(&mut self) -> Result<bool, VrmlError> {
+        Ok(self.peek_value("DEF")?
+            || self.peek_value("USE")?
+            || (self.peek()?.kind == TokenKind::Identifier && self.peek_next_symbol("{")?))
     }
 
     /// Return whether the current token matches the provided identifier text.
-    fn peek_value(&self, value: &str) -> bool {
-        self.peek().kind == TokenKind::Identifier && self.peek().value == value
+    fn peek_value(&mut self, value: &str) -> Result<bool, VrmlError> {
+        let token = self.peek()?;
+        Ok(token.kind == TokenKind::Identifier && token.value == value)
     }
 
     /// Return whether the next token after the current one is the provided symbol.
-    fn peek_next_symbol(&self, value: &str) -> bool {
-        self.peek_n(1).kind == TokenKind::Symbol && self.peek_n(1).value == value
+    fn peek_next_symbol(&mut self, value: &str) -> Result<bool, VrmlError> {
+        let token = self.tokens.peek(1)?;
+        Ok(token.kind == TokenKind::Symbol && token.value == value)
     }
 
     /// Return the current token.
-    fn peek(&self) -> &Token {
-        self.peek_n(0)
-    }
-
-    /// Return the token at the current position plus an offset.
-    fn peek_n(&self, offset: usize) -> &Token {
-        let index = self.index.saturating_add(offset);
-        self.tokens.get(index).unwrap_or_else(|| {
-            self.tokens
-                .last()
-                .expect("parser token stream always contains eof")
-        })
+    fn peek(&mut self) -> Result<Token, VrmlError> {
+        self.tokens.peek(0)
     }
 
     /// Advance and return the current token.
-    fn advance(&mut self) -> Token {
-        let token = self.peek_n(0).clone();
-        if token.kind != TokenKind::Eof {
-            self.index += 1;
-        }
-        token
+    fn advance(&mut self) -> Result<Token, VrmlError> {
+        self.tokens.advance()
     }
 
     /// Return whether the parser has consumed the entire token stream.
-    fn at_end(&self) -> bool {
-        self.peek().kind == TokenKind::Eof
+    fn at_end(&mut self) -> Result<bool, VrmlError> {
+        Ok(self.peek()?.kind == TokenKind::Eof)
     }
 }
 
@@ -542,6 +763,7 @@ fn field_kind(node_type: &str, field_name: &str) -> FieldKind {
         ("PerspectiveCamera", "position") => FieldKind::Vec3,
         ("PerspectiveCamera", "orientation") => FieldKind::Rotation,
         ("PerspectiveCamera", "heightAngle") => FieldKind::Float,
+        ("DirectionalLight", "on") => FieldKind::Bool,
         ("DirectionalLight", "direction") => FieldKind::Vec3,
         ("DirectionalLight", "color") => FieldKind::Vec3,
         ("DirectionalLight", "intensity") => FieldKind::Float,
@@ -582,13 +804,15 @@ fn field_kind(node_type: &str, field_name: &str) -> FieldKind {
 }
 
 /// Convert a parsed AST node into a structurally equivalent output node placeholder.
-fn convert_ast_node_to_out_node(node: AstNode) -> Result<crate::model::OutNode, VrmlError> {
-    let mut out_node = crate::model::OutNode::new(node.node_type);
+fn convert_ast_node_to_out_node(node: AstNode) -> Result<OutNode, VrmlError> {
+    let mut out_node = OutNode::new(node.node_type);
     out_node.def_name = node.def_name;
     out_node.fields = node.fields.into_iter().collect();
     for child in node.children {
         let value = match child {
-            Statement::Node(child_node) => Value::Node(Box::new(convert_ast_node_to_out_node(child_node)?)),
+            Statement::Node(child_node) => {
+                Value::Node(Box::new(convert_ast_node_to_out_node(child_node)?))
+            }
             Statement::Use(use_ref) => Value::Use(use_ref),
         };
         out_node.fields.push(("__child__".to_owned(), value));

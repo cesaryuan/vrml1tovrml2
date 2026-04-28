@@ -1,5 +1,7 @@
 //! VRML 2.0 text serialization for Rust output nodes.
 
+use std::io::{self, Write};
+
 use crate::model::{OutNode, Value};
 
 const VRML2_HEADER: &str = "#VRML V2.0 utf8";
@@ -8,21 +10,28 @@ const VRML2_HEADER: &str = "#VRML V2.0 utf8";
 pub struct VrmlWriter;
 
 impl VrmlWriter {
-    /// Render a full VRML 2.0 document from output nodes.
-    pub fn write(nodes: &[OutNode]) -> String {
-        let mut output = String::new();
-        output.push_str(VRML2_HEADER);
-        output.push_str("\n\n");
+    /// Write a full VRML 2.0 document directly to a byte stream.
+    pub fn write_to<W: Write>(nodes: &[OutNode], writer: &mut W) -> io::Result<()> {
+        writer.write_all(VRML2_HEADER.as_bytes())?;
+        writer.write_all(b"\n\n")?;
 
         for (index, node) in nodes.iter().enumerate() {
             if index > 0 {
-                output.push_str("\n\n");
+                writer.write_all(b"\n\n")?;
             }
-            output.push_str(&Self::render_node(node, 0));
+            writer.write_all(Self::render_node(node, 0).as_bytes())?;
         }
 
-        output.push('\n');
-        output
+        writer.write_all(b"\n")?;
+        Ok(())
+    }
+
+    /// Render a full VRML 2.0 document from output nodes.
+    #[allow(dead_code)]
+    pub fn write(nodes: &[OutNode]) -> String {
+        let mut output = Vec::new();
+        Self::write_to(nodes, &mut output).expect("writing to Vec<u8> cannot fail");
+        String::from_utf8(output).expect("writer only emits valid UTF-8")
     }
 
     /// Render one node with indentation that matches the Python writer.

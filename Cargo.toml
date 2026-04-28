@@ -3,6 +3,9 @@ name = "vrml1tovrml2-rs"
 version = "0.1.0"
 edition = "2024"
 
+[dependencies]
+indicatif = "0.18"
+
 [profile.release]
 lto = true
 codegen-units = 1
