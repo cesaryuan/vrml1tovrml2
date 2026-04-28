@@ -229,9 +229,19 @@ Collision {
 										1 0 0
 									]
 								}
+							colorIndex [
+								6,
+								6,
+								6,
+								6,
+								6,
+								6,
+								15,
+								9,
+								5
+							]
 							colorPerVertex FALSE
 							normalPerVertex FALSE
-							solid FALSE
 							convex FALSE
 							creaseAngle 0.5
 							coordIndex [
@@ -278,17 +288,6 @@ Collision {
 								32,
 								-1
 							]
-							colorIndex [
-								6,
-								6,
-								6,
-								6,
-								6,
-								6,
-								15,
-								9,
-								5
-							]
 							normalIndex [
 								0,
 								1,
@@ -305,8 +304,7 @@ Collision {
 				Shape {
 					appearance
 						Appearance {
-							material
-								USE _v2%0
+							material USE _v2%0
 						}
 					geometry
 						IndexedLineSet {
@@ -530,7 +528,41 @@ Collision {
 										1 0 0
 									]
 								}
-							colorPerVertex FALSE
+							colorIndex [
+								15,
+								15,
+								15,
+								15,
+								15,
+								15,
+								15,
+								15,
+								15,
+								15,
+								15,
+								15,
+								15,
+								15,
+								15,
+								15,
+								15,
+								15,
+								15,
+								15,
+								15,
+								15,
+								15,
+								15,
+								15,
+								15,
+								15,
+								9,
+								9,
+								9,
+								5,
+								5,
+								5
+							]
 							coordIndex [
 								0,
 								1,
@@ -631,41 +663,6 @@ Collision {
 								64,
 								65,
 								-1
-							]
-							colorIndex [
-								15,
-								15,
-								15,
-								15,
-								15,
-								15,
-								15,
-								15,
-								15,
-								15,
-								15,
-								15,
-								15,
-								15,
-								15,
-								15,
-								15,
-								15,
-								15,
-								15,
-								15,
-								15,
-								15,
-								15,
-								15,
-								15,
-								15,
-								9,
-								9,
-								9,
-								5,
-								5,
-								5
 							]
 						}
 				}

@@ -22,7 +22,6 @@ Collision {
 										0 1 0
 									]
 								}
-							solid FALSE
 							creaseAngle 0.5
 							coordIndex [
 								0,

@@ -5,10 +5,13 @@ Linux-native reimplementation of the old Windows `vrml1tovrml2.exe` workflow.
 这个仓库原先只有老的 Windows 二进制和你导出的逆向资料。现在补上了一个可直接在 Linux 上运行的命令行实现：
 
 - 可执行入口：`./vrml1tovrml2`
-- Python 实现：`./vrml1tovrml2.py`
+- Rust CLI 入口：`./src/main.rs`
+- Python 兼容 API 入口：`./vrml1tovrml2.py`
 - 模块化源码目录：`./vrml1tovrml2_pkg/`
 - 示例输入：`examples/sample_v1.wrl`
 - 示例输出：`examples/sample_v2.wrl`
+
+当前命令行入口已经改成 Rust 实现；它负责参数透传、工作目录和退出码处理，并转调现有的 Python 转换核心。
 
 ## WRL 目录建议
 
@@ -92,7 +95,8 @@ wrl/
 
 ## 代码说明
 
-- 兼容入口在 [vrml1tovrml2.py](/home/cesar/vrml1tovrml2/vrml1tovrml2.py)。
+- Rust CLI 入口在 [src/main.rs](/home/cesar/vrml1tovrml2/src/main.rs)。
+- Python 兼容 API 入口在 [vrml1tovrml2.py](/home/cesar/vrml1tovrml2/vrml1tovrml2.py)。
 - 模块化实现位于 [vrml1tovrml2_pkg](/home/cesar/vrml1tovrml2/vrml1tovrml2_pkg)：
   - [common.py](/home/cesar/vrml1tovrml2/vrml1tovrml2_pkg/common.py)
   - [specs.py](/home/cesar/vrml1tovrml2/vrml1tovrml2_pkg/specs.py)

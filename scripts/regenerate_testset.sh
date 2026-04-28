@@ -13,7 +13,7 @@ run_case() {
   local baseline_file="${ROOT_DIR}/wrl/cases/${case_dir}/baseline.v2.from_exe.wrl"
 
   echo "[info] regenerating case: ${case_dir}"
-  python3 "${ROOT_DIR}/vrml1tovrml2.py" "${input_file}" "${current_file}"
+  "${ROOT_DIR}/vrml1tovrml2" "${input_file}" "${current_file}"
 
   echo "[info] diff: ${case_dir}"
   diff -u "${baseline_file}" "${current_file}" || true
