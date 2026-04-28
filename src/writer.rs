@@ -12,6 +12,15 @@ pub struct VrmlWriter;
 impl VrmlWriter {
     /// Write a full VRML 2.0 document directly to a byte stream.
     pub fn write_to<W: Write>(nodes: &[OutNode], writer: &mut W) -> io::Result<()> {
+        Self::write_to_with_progress(nodes, writer, None)
+    }
+
+    /// Write a full VRML 2.0 document directly to a byte stream with progress callbacks.
+    pub fn write_to_with_progress<W: Write>(
+        nodes: &[OutNode],
+        writer: &mut W,
+        mut on_progress: Option<&mut dyn FnMut()>,
+    ) -> io::Result<()> {
         writer.write_all(VRML2_HEADER.as_bytes())?;
         writer.write_all(b"\n\n")?;
 
@@ -20,6 +29,9 @@ impl VrmlWriter {
                 writer.write_all(b"\n\n")?;
             }
             writer.write_all(Self::render_node(node, 0).as_bytes())?;
+            if let Some(callback) = on_progress.as_mut() {
+                callback();
+            }
         }
 
         writer.write_all(b"\n")?;

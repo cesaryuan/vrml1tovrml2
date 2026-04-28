@@ -73,26 +73,45 @@ pub fn run(args: CliArgs) -> Result<(), VrmlError> {
 
     let input_file = File::open(&args.input)?;
     let file_size = input_file.metadata()?.len();
-    let progress_bar = create_progress_bar(&args.input, file_size, args.progress)?;
+    let read_progress = create_read_progress_bar(&args.input, file_size, args.progress)?;
     let reader = BufReader::new(input_file);
-    let parse_result = if let Some(progress) = &progress_bar {
+    let parse_result = if let Some(progress) = &read_progress {
         parser::parse_vrml_reader(progress.wrap_read(reader))
     } else {
         parser::parse_vrml_reader(reader)
     };
-    if let Some(progress) = &progress_bar {
+    if let Some(progress) = &read_progress {
         progress.finish_and_clear();
     }
     let statements = parse_result?;
-    let nodes = converter::convert(&statements)?;
+
+    let convert_progress = create_count_progress_bar(
+        "Converting",
+        statement_count(&statements) as u64,
+        args.progress,
+    )?;
+    let mut on_convert_progress = || {
+        if let Some(progress) = &convert_progress {
+            progress.inc(1);
+        }
+    };
+    let convert_result = if args.progress {
+        converter::convert_with_progress(&statements, &mut on_convert_progress)
+    } else {
+        converter::convert(&statements)
+    };
+    if let Some(progress) = &convert_progress {
+        progress.finish_and_clear();
+    }
+    let nodes = convert_result?;
 
     if let Some(output_path) = args.output {
         if args.verbose {
             eprintln!("INFO vrml1tovrml2: Writing output file {}", output_path.display());
         }
-        write_output_file(&output_path, &nodes)?;
+        write_output_file(&output_path, &nodes, args.progress)?;
     } else {
-        write_stdout(&nodes)?;
+        write_stdout(&nodes, args.progress)?;
     }
 
     Ok(())
@@ -104,24 +123,65 @@ fn usage() -> &'static str {
 }
 
 /// Write output text to a file path.
-fn write_output_file(path: &Path, nodes: &[crate::model::OutNode]) -> Result<(), VrmlError> {
+fn write_output_file(
+    path: &Path,
+    nodes: &[crate::model::OutNode],
+    progress_enabled: bool,
+) -> Result<(), VrmlError> {
     let file = File::create(path)?;
     let mut writer = BufWriter::new(file);
-    VrmlWriter::write_to(nodes, &mut writer)?;
+    let write_progress = create_count_progress_bar("Writing", nodes.len() as u64, progress_enabled)?;
+    let mut on_write_progress = || {
+        if let Some(progress) = &write_progress {
+            progress.inc(1);
+        }
+    };
+    VrmlWriter::write_to_with_progress(
+        nodes,
+        &mut writer,
+        if progress_enabled {
+            Some(&mut on_write_progress)
+        } else {
+            None
+        },
+    )?;
     writer.flush()?;
+    if let Some(progress) = &write_progress {
+        progress.finish_and_clear();
+    }
     Ok(())
 }
 
 /// Write output text to stdout.
-fn write_stdout(nodes: &[crate::model::OutNode]) -> Result<(), VrmlError> {
+fn write_stdout(
+    nodes: &[crate::model::OutNode],
+    progress_enabled: bool,
+) -> Result<(), VrmlError> {
     let mut stdout = io::stdout().lock();
-    VrmlWriter::write_to(nodes, &mut stdout)?;
+    let write_progress = create_count_progress_bar("Writing", nodes.len() as u64, progress_enabled)?;
+    let mut on_write_progress = || {
+        if let Some(progress) = &write_progress {
+            progress.inc(1);
+        }
+    };
+    VrmlWriter::write_to_with_progress(
+        nodes,
+        &mut stdout,
+        if progress_enabled {
+            Some(&mut on_write_progress)
+        } else {
+            None
+        },
+    )?;
     stdout.flush()?;
+    if let Some(progress) = &write_progress {
+        progress.finish_and_clear();
+    }
     Ok(())
 }
 
-/// Create a byte-oriented progress bar when the flag is enabled.
-fn create_progress_bar(
+/// Create a byte-oriented progress bar for the input read phase.
+fn create_read_progress_bar(
     path: &Path,
     file_size: u64,
     enabled: bool,
@@ -131,12 +191,49 @@ fn create_progress_bar(
     }
 
     let style = ProgressStyle::with_template(
-        "{msg} [{wide_bar}] {bytes:>8}/{total_bytes:>8} ({percent:>3}%)",
+        "{msg:<12} [{wide_bar}] {bytes:>8}/{total_bytes:>8} ({percent:>3}%)",
     )
     .map_err(|error| VrmlError::from(format!("Invalid progress style: {error}")))?;
 
     let progress_bar = ProgressBar::new(file_size);
     progress_bar.set_style(style);
-    progress_bar.set_message(path.display().to_string());
+    progress_bar.set_message(format!("Reading {}", path.display()));
     Ok(Some(progress_bar))
+}
+
+/// Create a unit-count progress bar for conversion or writing phases.
+fn create_count_progress_bar(
+    label: &str,
+    total: u64,
+    enabled: bool,
+) -> Result<Option<ProgressBar>, VrmlError> {
+    if !enabled {
+        return Ok(None);
+    }
+
+    let safe_total = total.max(1);
+    let style = ProgressStyle::with_template(
+        "{msg:<12} [{wide_bar}] {pos:>6}/{len:<6} ({percent:>3}%)",
+    )
+    .map_err(|error| VrmlError::from(format!("Invalid progress style: {error}")))?;
+
+    let progress_bar = ProgressBar::new(safe_total);
+    progress_bar.set_style(style);
+    progress_bar.set_message(label.to_owned());
+    Ok(Some(progress_bar))
+}
+
+/// Count statements recursively so conversion progress reflects nested work too.
+fn statement_count(statements: &[crate::model::Statement]) -> usize {
+    statements.iter().map(count_statement).sum()
+}
+
+/// Count one statement and all nested child statements.
+fn count_statement(statement: &crate::model::Statement) -> usize {
+    match statement {
+        crate::model::Statement::Use(_) => 1,
+        crate::model::Statement::Node(node) => {
+            1 + node.children.iter().map(count_statement).sum::<usize>()
+        }
+    }
 }

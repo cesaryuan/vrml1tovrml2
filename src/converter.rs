@@ -7,18 +7,29 @@ use crate::model::{AstNode, OutNode, Statement, UseRef, Value};
 
 /// Convert parsed VRML 1.0 statements into VRML 2.0 output nodes.
 pub fn convert(statements: &[Statement]) -> Result<Vec<OutNode>, VrmlError> {
-    let mut converter = Converter::new();
+    let mut converter = Converter::new(None);
+    converter.convert(statements)
+}
+
+/// Convert parsed VRML 1.0 statements into VRML 2.0 output nodes with progress callbacks.
+pub fn convert_with_progress(
+    statements: &[Statement],
+    on_progress: &mut dyn FnMut(),
+) -> Result<Vec<OutNode>, VrmlError> {
+    let mut converter = Converter::new(Some(on_progress));
     converter.convert(statements)
 }
 
 /// Hold reusable state while traversing a VRML 1.0 scene.
-struct Converter {
+struct Converter<'a> {
     /// Track `DEF` names that have already been emitted.
     emitted_defs: HashMap<String, ()>,
     /// Reuse implicit materials across shapes with identical properties.
     generated_material_names: HashMap<String, String>,
     /// Allocate fresh implicit material names.
     generated_material_counter: usize,
+    /// Report per-statement conversion progress when enabled.
+    on_progress: Option<&'a mut dyn FnMut()>,
 }
 
 /// Track one persistent transform operation from VRML 1.0 traversal.
@@ -110,13 +121,14 @@ enum NodeRef {
     Defined(String, OutNode),
 }
 
-impl Converter {
+impl<'a> Converter<'a> {
     /// Create a converter with empty definition and material caches.
-    fn new() -> Self {
+    fn new(on_progress: Option<&'a mut dyn FnMut()>) -> Self {
         Self {
             emitted_defs: HashMap::new(),
             generated_material_names: HashMap::new(),
             generated_material_counter: 0,
+            on_progress,
         }
     }
 
@@ -187,9 +199,17 @@ impl Converter {
         statement: &Statement,
         state: &mut ConversionState,
     ) -> Result<Vec<OutNode>, VrmlError> {
+        self.report_progress();
         match statement {
             Statement::Use(use_ref) => self.apply_use_reference(use_ref, state),
             Statement::Node(node) => self.convert_node(node, state),
+        }
+    }
+
+    /// Advance the conversion progress counter when a callback is configured.
+    fn report_progress(&mut self) {
+        if let Some(on_progress) = self.on_progress.as_mut() {
+            on_progress();
         }
     }
 
