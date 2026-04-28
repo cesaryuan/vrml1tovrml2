@@ -16,22 +16,23 @@ impl VrmlWriter {
     }
 
     /// Write a full VRML 2.0 document directly to a byte stream with progress callbacks.
-    pub fn write_to_with_progress<W: Write>(
+    pub fn write_to_with_progress<'a, W: Write>(
         nodes: &[OutNode],
-        writer: &mut W,
-        mut on_progress: Option<&mut dyn FnMut()>,
+        writer: &'a mut W,
+        on_progress: Option<&'a mut dyn FnMut()>,
     ) -> io::Result<()> {
-        writer.write_all(VRML2_HEADER.as_bytes())?;
-        writer.write_all(b"\n\n")?;
+        let mut state = WriterState::new(writer, on_progress);
+        state.writer.write_all(VRML2_HEADER.as_bytes())?;
+        state.writer.write_all(b"\n\n")?;
 
         for (index, node) in nodes.iter().enumerate() {
             if index > 0 {
-                writer.write_all(b"\n\n")?;
+                state.writer.write_all(b"\n\n")?;
             }
-            writer.write_all(Self::render_node_with_progress(node, 0, &mut on_progress).as_bytes())?;
+            state.write_node(node, 0)?;
         }
 
-        writer.write_all(b"\n")?;
+        state.writer.write_all(b"\n")?;
         Ok(())
     }
 
@@ -41,110 +42,6 @@ impl VrmlWriter {
         let mut output = Vec::new();
         Self::write_to(nodes, &mut output).expect("writing to Vec<u8> cannot fail");
         String::from_utf8(output).expect("writer only emits valid UTF-8")
-    }
-
-    /// Render one node with indentation that matches the Python writer.
-    fn render_node(node: &OutNode, indent: usize) -> String {
-        Self::render_node_with_progress(node, indent, &mut None)
-    }
-
-    /// Render one node with indentation and optionally advance write progress.
-    fn render_node_with_progress(
-        node: &OutNode,
-        indent: usize,
-        on_progress: &mut Option<&mut dyn FnMut()>,
-    ) -> String {
-        let prefix = Self::indent(indent);
-        let mut header = node.node_type.clone();
-        if let Some(def_name) = &node.def_name {
-            header = format!("DEF {def_name} {header}");
-        }
-
-        if node.fields.is_empty() {
-            if let Some(callback) = on_progress.as_mut() {
-                callback();
-            }
-            return format!("{prefix}{header} {{\n{prefix}}}");
-        }
-
-        let mut lines = vec![format!("{prefix}{header} {{")];
-        for (field_name, value) in &node.fields {
-            lines.extend(Self::render_field(field_name, value, indent + 2, on_progress));
-        }
-        lines.push(format!("{prefix}}}"));
-        if let Some(callback) = on_progress.as_mut() {
-            callback();
-        }
-        lines.join("\n")
-    }
-
-    /// Render one field assignment and its nested structure when needed.
-    fn render_field(
-        field_name: &str,
-        value: &Value,
-        indent: usize,
-        on_progress: &mut Option<&mut dyn FnMut()>,
-    ) -> Vec<String> {
-        let prefix = Self::indent(indent);
-        match value {
-            Value::Node(node) => {
-                let node_lines = Self::render_node_with_progress(node, indent + 2, on_progress)
-                    .lines()
-                    .map(ToOwned::to_owned)
-                    .collect::<Vec<_>>();
-                let mut lines = vec![format!("{prefix}{field_name}")];
-                lines.extend(node_lines);
-                lines
-            }
-            Value::Use(use_ref) => {
-                let mut lines = vec![format!("{prefix}{field_name}")];
-                lines.push(format!("{}USE {}", Self::indent(indent + 2), use_ref.name));
-                lines
-            }
-            Value::List(values) if values.iter().all(Self::is_node_like) => {
-                let mut lines = vec![format!("{prefix}{field_name} [")];
-                for (index, item) in values.iter().enumerate() {
-                    let mut rendered_item = Self::render_node_like(item, indent + 2, on_progress);
-                    if index + 1 < values.len() {
-                        if let Some(last) = rendered_item.last_mut() {
-                            last.push(',');
-                        }
-                    }
-                    lines.extend(rendered_item);
-                }
-                lines.push(format!("{prefix}]"));
-                lines
-            }
-            Value::List(values) => {
-                let mut lines = vec![format!("{prefix}{field_name} [")];
-                for (index, item) in values.iter().enumerate() {
-                    let mut line = format!("{}{}", Self::indent(indent + 2), Self::render_scalar(item));
-                    if index + 1 < values.len() {
-                        line.push(',');
-                    }
-                    lines.push(line);
-                }
-                lines.push(format!("{prefix}]"));
-                lines
-            }
-            _ => vec![format!("{prefix}{field_name} {}", Self::render_scalar(value))],
-        }
-    }
-
-    /// Render a node-like list item.
-    fn render_node_like(
-        value: &Value,
-        indent: usize,
-        on_progress: &mut Option<&mut dyn FnMut()>,
-    ) -> Vec<String> {
-        match value {
-            Value::Node(node) => Self::render_node_with_progress(node, indent, on_progress)
-                .lines()
-                .map(ToOwned::to_owned)
-                .collect(),
-            Value::Use(use_ref) => vec![format!("{}USE {}", Self::indent(indent), use_ref.name)],
-            _ => vec![format!("{}{}", Self::indent(indent), Self::render_scalar(value))],
-        }
     }
 
     /// Count all output nodes recursively for write-progress sizing.
@@ -169,50 +66,174 @@ impl VrmlWriter {
             _ => 0,
         }
     }
+}
 
-    /// Render a scalar value or fixed-size vector.
-    fn render_scalar(value: &Value) -> String {
+/// Hold the mutable writer state used during recursive streaming output.
+struct WriterState<'a, W: Write> {
+    /// Final byte sink for VRML output.
+    writer: &'a mut W,
+    /// Optional callback used to update progress as nodes are written.
+    on_progress: Option<&'a mut dyn FnMut()>,
+}
+
+impl<'a, W: Write> WriterState<'a, W> {
+    /// Create a streaming writer state around a byte sink.
+    fn new(writer: &'a mut W, on_progress: Option<&'a mut dyn FnMut()>) -> Self {
+        Self {
+            writer,
+            on_progress,
+        }
+    }
+
+    /// Write one node with indentation that matches the Python writer.
+    fn write_node(&mut self, node: &OutNode, indent: usize) -> io::Result<()> {
+        self.write_indent(indent)?;
+        if let Some(def_name) = &node.def_name {
+            write!(self.writer, "DEF {def_name} {} ", node.node_type)?;
+        } else {
+            write!(self.writer, "{} ", node.node_type)?;
+        }
+
+        if node.fields.is_empty() {
+            self.writer.write_all(b"{\n")?;
+            self.write_indent(indent)?;
+            self.writer.write_all(b"}")?;
+            self.tick_progress();
+            return Ok(());
+        }
+
+        self.writer.write_all(b"{\n")?;
+        for (field_name, value) in &node.fields {
+            self.write_field(field_name, value, indent + 2)?;
+        }
+        self.write_indent(indent)?;
+        self.writer.write_all(b"}")?;
+        self.tick_progress();
+        Ok(())
+    }
+
+    /// Write one field assignment and its nested structure when needed.
+    fn write_field(&mut self, field_name: &str, value: &Value, indent: usize) -> io::Result<()> {
+        self.write_indent(indent)?;
+        self.writer.write_all(field_name.as_bytes())?;
+
+        match value {
+            Value::Node(node) => {
+                self.writer.write_all(b"\n")?;
+                self.write_node(node, indent + 2)?;
+            }
+            Value::Use(use_ref) => {
+                self.writer.write_all(b"\n")?;
+                self.write_indent(indent + 2)?;
+                write!(self.writer, "USE {}", use_ref.name)?;
+            }
+            Value::List(values) if values.iter().all(is_node_like) => {
+                self.writer.write_all(b" [\n")?;
+                for (index, item) in values.iter().enumerate() {
+                    self.write_node_like(item, indent + 2)?;
+                    if index + 1 < values.len() {
+                        self.writer.write_all(b",")?;
+                    }
+                    self.writer.write_all(b"\n")?;
+                }
+                self.write_indent(indent)?;
+                self.writer.write_all(b"]")?;
+            }
+            Value::List(values) => {
+                self.writer.write_all(b" [\n")?;
+                for (index, item) in values.iter().enumerate() {
+                    self.write_indent(indent + 2)?;
+                    self.write_scalar(item)?;
+                    if index + 1 < values.len() {
+                        self.writer.write_all(b",")?;
+                    }
+                    self.writer.write_all(b"\n")?;
+                }
+                self.write_indent(indent)?;
+                self.writer.write_all(b"]")?;
+            }
+            _ => {
+                self.writer.write_all(b" ")?;
+                self.write_scalar(value)?;
+            }
+        }
+
+        self.writer.write_all(b"\n")?;
+        Ok(())
+    }
+
+    /// Write a node-like list item.
+    fn write_node_like(&mut self, value: &Value, indent: usize) -> io::Result<()> {
+        match value {
+            Value::Node(node) => self.write_node(node, indent),
+            Value::Use(use_ref) => {
+                self.write_indent(indent)?;
+                write!(self.writer, "USE {}", use_ref.name)
+            }
+            _ => {
+                self.write_indent(indent)?;
+                self.write_scalar(value)
+            }
+        }
+    }
+
+    /// Write one scalar value or fixed-size vector.
+    fn write_scalar(&mut self, value: &Value) -> io::Result<()> {
         match value {
             Value::Bool(value) => {
                 if *value {
-                    "TRUE".to_owned()
+                    self.writer.write_all(b"TRUE")
                 } else {
-                    "FALSE".to_owned()
+                    self.writer.write_all(b"FALSE")
                 }
             }
-            Value::Int(value) => value.to_string(),
-            Value::Float(value) => Self::format_number(*value),
-            Value::String(value) => format!("\"{value}\""),
-            Value::Identifier(value) => value.clone(),
-            Value::Vec(values) => values
-                .iter()
-                .map(|value| Self::format_number(*value))
-                .collect::<Vec<_>>()
-                .join(" "),
-            Value::List(_) => "[]".to_owned(),
-            Value::Node(node) => Self::render_node(node, 0),
-            Value::Use(use_ref) => format!("USE {}", use_ref.name),
+            Value::Int(value) => write!(self.writer, "{value}"),
+            Value::Float(value) => write!(self.writer, "{}", format_number(*value)),
+            Value::String(value) => write!(self.writer, "\"{value}\""),
+            Value::Identifier(value) => self.writer.write_all(value.as_bytes()),
+            Value::Vec(values) => {
+                for (index, value) in values.iter().enumerate() {
+                    if index > 0 {
+                        self.writer.write_all(b" ")?;
+                    }
+                    write!(self.writer, "{}", format_number(*value))?;
+                }
+                Ok(())
+            }
+            Value::List(_) => self.writer.write_all(b"[]"),
+            Value::Node(node) => self.write_node(node, 0),
+            Value::Use(use_ref) => write!(self.writer, "USE {}", use_ref.name),
         }
     }
 
-    /// Format a float without noisy trailing zeros.
-    fn format_number(value: f64) -> String {
-        let text = format!("{value:.9}");
-        let text = text.trim_end_matches('0').trim_end_matches('.');
-        if text.is_empty() || text == "-0" {
-            "0".to_owned()
-        } else {
-            text.to_owned()
+    /// Write one logical indentation level using tabs like the Python writer.
+    fn write_indent(&mut self, indent: usize) -> io::Result<()> {
+        for _ in 0..(indent / 2) {
+            self.writer.write_all(b"\t")?;
+        }
+        Ok(())
+    }
+
+    /// Advance the write-progress callback after a node has been serialized.
+    fn tick_progress(&mut self) {
+        if let Some(callback) = self.on_progress.as_mut() {
+            callback();
         }
     }
+}
 
-    /// Return whether a value should render as a nested node block.
-    fn is_node_like(value: &Value) -> bool {
-        matches!(value, Value::Node(_) | Value::Use(_))
-    }
+/// Return whether a value should render as a nested node block.
+fn is_node_like(value: &Value) -> bool {
+    matches!(value, Value::Node(_) | Value::Use(_))
+}
 
-    /// Create the tab indentation used by the existing writer.
-    fn indent(indent: usize) -> String {
-        "\t".repeat(indent / 2)
+/// Format a float without noisy trailing zeros.
+fn format_number(value: f64) -> String {
+    let text = format!("{value:.9}");
+    let text = text.trim_end_matches('0').trim_end_matches('.');
+    if text.is_empty() || text == "-0" {
+        "0".to_owned()
+    } else {
+        text.to_owned()
     }
 }
