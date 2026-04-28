@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 indicatif = "0.18"
+rayon = "1.10"
 
 [profile.release]
 lto = true

@@ -144,36 +144,42 @@ impl<'a> Converter<'a> {
 
     /// Wrap the scene in `Collision` and `Group` nodes like the Python converter.
     fn wrap_root(&self, nodes: Vec<OutNode>) -> OutNode {
-        let group_children = if nodes.len() == 1 && nodes[0].node_type == "Group" && nodes[0].def_name.is_none() {
-            nodes[0]
-                .fields
-                .iter()
-                .find_map(|(name, value)| {
-                    if name == "children" {
-                        if let Value::List(values) = value {
-                            return Some(
-                                values
-                                    .iter()
-                                    .filter_map(|value| match value {
-                                        Value::Node(node) => Some((**node).clone()),
-                                        _ => None,
-                                    })
-                                    .collect::<Vec<_>>(),
-                            );
+        let group_children =
+            if nodes.len() == 1 && nodes[0].node_type == "Group" && nodes[0].def_name.is_none() {
+                nodes[0]
+                    .fields
+                    .iter()
+                    .find_map(|(name, value)| {
+                        if name == "children" {
+                            if let Value::List(values) = value {
+                                return Some(
+                                    values
+                                        .iter()
+                                        .filter_map(|value| match value {
+                                            Value::Node(node) => Some((**node).clone()),
+                                            _ => None,
+                                        })
+                                        .collect::<Vec<_>>(),
+                                );
+                            }
                         }
-                    }
-                    None
-                })
-                .unwrap_or(nodes)
-        } else {
-            nodes
-        };
+                        None
+                    })
+                    .unwrap_or(nodes)
+            } else {
+                nodes
+            };
 
         let mut group = OutNode::new("Group");
-        group.fields.push(("children".to_owned(), Value::List(node_list(group_children))));
+        group.fields.push((
+            "children".to_owned(),
+            Value::List(node_list(group_children)),
+        ));
 
         let mut collision = OutNode::new("Collision");
-        collision.fields.push(("collide".to_owned(), Value::Bool(false)));
+        collision
+            .fields
+            .push(("collide".to_owned(), Value::Bool(false)));
         collision
             .fields
             .push(("children".to_owned(), Value::List(node_list(vec![group]))));
@@ -277,7 +283,9 @@ impl<'a> Converter<'a> {
                 let emitted = self.wrap_transforms(shape, &transforms);
                 Ok(vec![self.store_emitted_definition(emitted, state)])
             }
-            other => Err(VrmlError::from(format!("Unsupported node type in Rust converter: {other}"))),
+            other => Err(VrmlError::from(format!(
+                "Unsupported node type in Rust converter: {other}"
+            ))),
         }
     }
 
@@ -317,7 +325,11 @@ impl<'a> Converter<'a> {
     }
 
     /// Convert a geometry node into a VRML 2.0 `Shape`.
-    fn convert_shape(&mut self, node: &AstNode, state: &mut ConversionState) -> Result<OutNode, VrmlError> {
+    fn convert_shape(
+        &mut self,
+        node: &AstNode,
+        state: &mut ConversionState,
+    ) -> Result<OutNode, VrmlError> {
         let geometry = self.convert_geometry(node, state)?;
         let appearance = self.build_appearance(state);
         let mut shape = OutNode::new("Shape");
@@ -332,7 +344,11 @@ impl<'a> Converter<'a> {
     }
 
     /// Convert the geometry-specific part of one shape node.
-    fn convert_geometry(&mut self, node: &AstNode, state: &mut ConversionState) -> Result<OutNode, VrmlError> {
+    fn convert_geometry(
+        &mut self,
+        node: &AstNode,
+        state: &mut ConversionState,
+    ) -> Result<OutNode, VrmlError> {
         match node.node_type.as_str() {
             "IndexedFaceSet" => self.convert_indexed_face_set(node, state),
             "IndexedLineSet" => self.convert_indexed_line_set(node, state),
@@ -350,7 +366,9 @@ impl<'a> Converter<'a> {
                 Ok(out)
             }
             "AsciiText" => self.convert_ascii_text(node, state),
-            other => Err(VrmlError::from(format!("Unsupported geometry node {other}"))),
+            other => Err(VrmlError::from(format!(
+                "Unsupported geometry node {other}"
+            ))),
         }
     }
 
@@ -375,21 +393,37 @@ impl<'a> Converter<'a> {
             out.fields
                 .push(("color".to_owned(), Value::Node(Box::new(color_node))));
             if let Some(color_index) = color_index {
-                out.fields
-                    .push(("__pending_color_index__".to_owned(), Value::List(color_index)));
+                out.fields.push((
+                    "__pending_color_index__".to_owned(),
+                    Value::List(color_index),
+                ));
             }
         }
 
         if matches!(
-            state.material_binding.as_deref().map(|value| value.to_ascii_uppercase()),
-            Some(value) if matches!(value.as_str(), "PER_FACE" | "PER_FACE_INDEXED" | "PER_PART" | "PER_PART_INDEXED")
+            state
+                .material_binding
+                .as_deref()
+                .map(|value| value.to_ascii_uppercase()),
+            Some(value)
+                if matches!(
+                    value.as_str(),
+                    "PER_FACE" | "PER_FACE_INDEXED" | "PER_PART" | "PER_PART_INDEXED"
+                )
         ) {
             out.fields
                 .push(("colorPerVertex".to_owned(), Value::Bool(false)));
         }
         if matches!(
-            state.normal_binding.as_deref().map(|value| value.to_ascii_uppercase()),
-            Some(value) if matches!(value.as_str(), "PER_FACE" | "PER_FACE_INDEXED" | "PER_PART" | "PER_PART_INDEXED")
+            state
+                .normal_binding
+                .as_deref()
+                .map(|value| value.to_ascii_uppercase()),
+            Some(value)
+                if matches!(
+                    value.as_str(),
+                    "PER_FACE" | "PER_FACE_INDEXED" | "PER_PART" | "PER_PART_INDEXED"
+                )
         ) {
             out.fields
                 .push(("normalPerVertex".to_owned(), Value::Bool(false)));
@@ -457,14 +491,23 @@ impl<'a> Converter<'a> {
             out.fields
                 .push(("color".to_owned(), Value::Node(Box::new(color_node))));
             if let Some(color_index) = color_index {
-                out.fields
-                    .push(("__pending_color_index__".to_owned(), Value::List(color_index)));
+                out.fields.push((
+                    "__pending_color_index__".to_owned(),
+                    Value::List(color_index),
+                ));
             }
         }
 
         if matches!(
-            state.material_binding.as_deref().map(|value| value.to_ascii_uppercase()),
-            Some(value) if matches!(value.as_str(), "PER_FACE" | "PER_FACE_INDEXED" | "PER_PART" | "PER_PART_INDEXED")
+            state
+                .material_binding
+                .as_deref()
+                .map(|value| value.to_ascii_uppercase()),
+            Some(value)
+                if matches!(
+                    value.as_str(),
+                    "PER_FACE" | "PER_FACE_INDEXED" | "PER_PART" | "PER_PART_INDEXED"
+                )
         ) {
             out.fields
                 .push(("colorPerVertex".to_owned(), Value::Bool(false)));
@@ -481,12 +524,18 @@ impl<'a> Converter<'a> {
     }
 
     /// Convert a VRML 1.0 `PointSet`.
-    fn convert_point_set(&mut self, node: &AstNode, state: &mut ConversionState) -> Result<OutNode, VrmlError> {
+    fn convert_point_set(
+        &mut self,
+        node: &AstNode,
+        state: &mut ConversionState,
+    ) -> Result<OutNode, VrmlError> {
         let mut out = OutNode::new("PointSet");
 
         if let Some(coordinate) = &state.coordinate {
-            out.fields
-                .push(("coord".to_owned(), self.slice_coordinate_value(coordinate, node)?));
+            out.fields.push((
+                "coord".to_owned(),
+                self.slice_coordinate_value(coordinate, node)?,
+            ));
         }
 
         if let Some((color_node, _)) = self.build_color_node(state, node)? {
@@ -498,14 +547,20 @@ impl<'a> Converter<'a> {
     }
 
     /// Convert a VRML 1.0 `AsciiText`.
-    fn convert_ascii_text(&mut self, node: &AstNode, state: &mut ConversionState) -> Result<OutNode, VrmlError> {
+    fn convert_ascii_text(
+        &mut self,
+        node: &AstNode,
+        state: &mut ConversionState,
+    ) -> Result<OutNode, VrmlError> {
         let mut out = OutNode::new("Text");
         out.fields.push((
             "string".to_owned(),
-            self.value_to_string_list(node.fields.get("string")).unwrap_or(Value::List(Vec::new())),
+            self.value_to_string_list(node.fields.get("string"))
+                .unwrap_or(Value::List(Vec::new())),
         ));
         if let Some(width) = self.float_field(node, "width") {
-            out.fields.push(("maxExtent".to_owned(), Value::Float(width)));
+            out.fields
+                .push(("maxExtent".to_owned(), Value::Float(width)));
         }
         if let Some(font_style) = self.merge_font_style(state, node)? {
             out.fields
@@ -524,7 +579,8 @@ impl<'a> Converter<'a> {
             out.fields.push(("orientation".to_owned(), value.clone()));
         }
         if let Some(value) = self.float_field(node, "heightAngle") {
-            out.fields.push(("fieldOfView".to_owned(), Value::Float(value)));
+            out.fields
+                .push(("fieldOfView".to_owned(), Value::Float(value)));
         }
         out.def_name = node.def_name.clone();
         out
@@ -609,11 +665,14 @@ impl<'a> Converter<'a> {
         let ambient_intensity = (ambient.iter().sum::<f64>() / 3.0).clamp(0.0, 1.0);
 
         if (ambient_intensity - 0.2).abs() > 1e-9 {
-            out.fields
-                .push(("ambientIntensity".to_owned(), Value::Float(ambient_intensity)));
+            out.fields.push((
+                "ambientIntensity".to_owned(),
+                Value::Float(ambient_intensity),
+            ));
         }
         if diffuse != vec![0.8, 0.8, 0.8] {
-            out.fields.push(("diffuseColor".to_owned(), Value::Vec(diffuse)));
+            out.fields
+                .push(("diffuseColor".to_owned(), Value::Vec(diffuse)));
         }
         if let Some(specular) = material.specular_colors.first() {
             if *specular != vec![0.0, 0.0, 0.0] {
@@ -659,7 +718,10 @@ impl<'a> Converter<'a> {
             return Ok(None);
         }
         if material.diffuse_colors.len() == 1
-            && !matches!(geometry_node.node_type.as_str(), "IndexedLineSet" | "PointSet")
+            && !matches!(
+                geometry_node.node_type.as_str(),
+                "IndexedLineSet" | "PointSet"
+            )
         {
             return Ok(None);
         }
@@ -695,18 +757,23 @@ impl<'a> Converter<'a> {
         state: &mut ConversionState,
     ) -> Result<MaterialRef, VrmlError> {
         let material = MaterialState {
-            ambient_colors: self.ensure_color_list(node.fields.get("ambientColor"), &[0.2, 0.2, 0.2])?,
-            diffuse_colors: self.ensure_color_list(node.fields.get("diffuseColor"), &[0.8, 0.8, 0.8])?,
-            specular_colors: self.ensure_color_list(node.fields.get("specularColor"), &[0.0, 0.0, 0.0])?,
-            emissive_colors: self.ensure_color_list(node.fields.get("emissiveColor"), &[0.0, 0.0, 0.0])?,
+            ambient_colors: self
+                .ensure_color_list(node.fields.get("ambientColor"), &[0.2, 0.2, 0.2])?,
+            diffuse_colors: self
+                .ensure_color_list(node.fields.get("diffuseColor"), &[0.8, 0.8, 0.8])?,
+            specular_colors: self
+                .ensure_color_list(node.fields.get("specularColor"), &[0.0, 0.0, 0.0])?,
+            emissive_colors: self
+                .ensure_color_list(node.fields.get("emissiveColor"), &[0.0, 0.0, 0.0])?,
             shininess: self.ensure_float_list(node.fields.get("shininess"), 0.2)?,
             transparency: self.ensure_float_list(node.fields.get("transparency"), 0.0)?,
         };
 
         if let Some(def_name) = &node.def_name {
-            state
-                .definitions
-                .insert(def_name.clone(), DefinitionValue::Material(material.clone()));
+            state.definitions.insert(
+                def_name.clone(),
+                DefinitionValue::Material(material.clone()),
+            );
             return Ok(MaterialRef::Defined(def_name.clone(), material));
         }
 
@@ -754,7 +821,9 @@ impl<'a> Converter<'a> {
         }
 
         if let Some(spacing) = self.float_field(text_node, "spacing") {
-            merged.fields.push(("spacing".to_owned(), Value::Float(spacing)));
+            merged
+                .fields
+                .push(("spacing".to_owned(), Value::Float(spacing)));
         }
         if let Some(justification) = self.enum_value(text_node, "justification") {
             let mapped = match justification.to_ascii_uppercase().as_str() {
@@ -777,7 +846,11 @@ impl<'a> Converter<'a> {
     }
 
     /// Slice coordinates for `PointSet startIndex/numPoints`.
-    fn slice_coordinate_value(&mut self, coordinate: &NodeRef, point_set: &AstNode) -> Result<Value, VrmlError> {
+    fn slice_coordinate_value(
+        &mut self,
+        coordinate: &NodeRef,
+        point_set: &AstNode,
+    ) -> Result<Value, VrmlError> {
         if let NodeRef::Defined(name, _) = coordinate {
             return Ok(Value::Use(UseRef { name: name.clone() }));
         }
@@ -785,7 +858,13 @@ impl<'a> Converter<'a> {
         let point_values = source
             .fields
             .iter()
-            .find_map(|(name, value)| if name == "point" { Some(value.clone()) } else { None })
+            .find_map(|(name, value)| {
+                if name == "point" {
+                    Some(value.clone())
+                } else {
+                    None
+                }
+            })
             .unwrap_or(Value::List(Vec::new()));
 
         let points = match point_values {
@@ -820,7 +899,8 @@ impl<'a> Converter<'a> {
             match transform.kind {
                 TransformKind::Translation => {
                     let mut out = OutNode::new("Transform");
-                    out.fields.push(("translation".to_owned(), transform.value.clone()));
+                    out.fields
+                        .push(("translation".to_owned(), transform.value.clone()));
                     out.fields.push((
                         "children".to_owned(),
                         Value::List(vec![Value::Node(Box::new(wrapped))]),
@@ -871,7 +951,9 @@ impl<'a> Converter<'a> {
     /// Store emitted node definitions so later `USE` statements can reference them.
     fn store_emitted_definition(&self, node: OutNode, state: &mut ConversionState) -> OutNode {
         if let Some(def_name) = &node.def_name {
-            state.definitions.insert(def_name.clone(), DefinitionValue::Node);
+            state
+                .definitions
+                .insert(def_name.clone(), DefinitionValue::Node);
         }
         node
     }
@@ -971,7 +1053,11 @@ impl<'a> Converter<'a> {
     }
 
     /// Normalize a parsed color field into a list of RGB vectors.
-    fn ensure_color_list(&self, value: Option<&Value>, default: &[f64]) -> Result<Vec<Vec<f64>>, VrmlError> {
+    fn ensure_color_list(
+        &self,
+        value: Option<&Value>,
+        default: &[f64],
+    ) -> Result<Vec<Vec<f64>>, VrmlError> {
         match value {
             None => Ok(vec![default.to_vec()]),
             Some(Value::Vec(values)) => Ok(vec![values.clone()]),
@@ -987,7 +1073,11 @@ impl<'a> Converter<'a> {
     }
 
     /// Normalize a parsed scalar field into a list of floats.
-    fn ensure_float_list(&self, value: Option<&Value>, default: f64) -> Result<Vec<f64>, VrmlError> {
+    fn ensure_float_list(
+        &self,
+        value: Option<&Value>,
+        default: f64,
+    ) -> Result<Vec<f64>, VrmlError> {
         match value {
             None => Ok(vec![default]),
             Some(Value::Float(value)) => Ok(vec![*value]),
