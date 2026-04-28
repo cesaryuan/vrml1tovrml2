@@ -6,6 +6,7 @@ Linux-native reimplementation of the old Windows `vrml1tovrml2.exe` workflow.
 
 - 可执行入口：`./vrml1tovrml2`
 - Python 实现：`./vrml1tovrml2.py`
+- 模块化源码目录：`./vrml1tovrml2_pkg/`
 - 示例输入：`examples/sample_v1.wrl`
 - 示例输出：`examples/sample_v2.wrl`
 
@@ -50,6 +51,14 @@ wrl/
 ./vrml1tovrml2 input_v1.wrl output_v2.wrl --verbose
 ```
 
+如果环境里安装了 `tqdm`，可以打开输入读取进度条：
+
+```bash
+./vrml1tovrml2 --progress input_v1.wrl output_v2.wrl
+```
+
+如果没有安装 `tqdm`，程序会自动降级，不会报错。
+
 ## 当前已实现并验证的节点
 
 - 分组与层级：`Separator`, `TransformSeparator`, `Group`, `Switch`, `LOD`
@@ -83,6 +92,22 @@ wrl/
 
 ## 代码说明
 
-- 解析、转换、输出都在 [vrml1tovrml2.py](/home/cesar/vrml1tovrml2/vrml1tovrml2.py)。
-- 代码里在关键路径补了必要日志和简短注释，便于继续对照逆向资料扩展。
+- 兼容入口在 [vrml1tovrml2.py](/home/cesar/vrml1tovrml2/vrml1tovrml2.py)。
+- 模块化实现位于 [vrml1tovrml2_pkg](/home/cesar/vrml1tovrml2/vrml1tovrml2_pkg)：
+  - [common.py](/home/cesar/vrml1tovrml2/vrml1tovrml2_pkg/common.py)
+  - [specs.py](/home/cesar/vrml1tovrml2/vrml1tovrml2_pkg/specs.py)
+  - [parser.py](/home/cesar/vrml1tovrml2/vrml1tovrml2_pkg/parser.py)
+  - [converter.py](/home/cesar/vrml1tovrml2/vrml1tovrml2_pkg/converter.py)
+  - [writer.py](/home/cesar/vrml1tovrml2/vrml1tovrml2_pkg/writer.py)
+  - [cli.py](/home/cesar/vrml1tovrml2/vrml1tovrml2_pkg/cli.py)
+  - [progress.py](/home/cesar/vrml1tovrml2/vrml1tovrml2_pkg/progress.py)
 - 回归脚本在 [scripts/regenerate_testset.sh](/home/cesar/vrml1tovrml2/scripts/regenerate_testset.sh)。
+
+## 并行化评估
+
+- 对“单个超大 `.wrl` 文件内部”直接并行处理，目前不建议强上。
+  原因是 VRML1 场景遍历有明显的顺序状态依赖，例如 `Material`、`Coordinate3`、`Normal`、`Binding`、变换栈和 `DEF/USE`。
+- 现阶段更安全的并行方向是“多文件级并行”：
+  同时转换多个独立 case 或多个独立 `.wrl` 文件。
+- 如果后续继续深挖单文件并行，比较现实的方向是：
+  先把顶层 `Separator` 下的独立 geometry/shapes 切成批次，再做受控并行，但这需要进一步重构转换状态模型。
