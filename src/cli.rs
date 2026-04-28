@@ -3,6 +3,7 @@
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use indicatif::{ProgressBar, ProgressStyle};
 
@@ -60,6 +61,7 @@ pub fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<CliArgs, Vrm
 
 /// Run the full Rust CLI conversion flow.
 pub fn run(args: CliArgs) -> Result<(), VrmlError> {
+    let total_started_at = Instant::now();
     if !args.input.is_file() {
         return Err(VrmlError::from(format!(
             "Invalid input file name specified: {}",
@@ -75,21 +77,24 @@ pub fn run(args: CliArgs) -> Result<(), VrmlError> {
     let file_size = input_file.metadata()?.len();
     let read_progress = create_read_progress_bar(&args.input, file_size, args.progress)?;
     let reader = BufReader::new(input_file);
+    let read_started_at = Instant::now();
     let parse_result = if let Some(progress) = &read_progress {
         parser::parse_vrml_reader(progress.wrap_read(reader))
     } else {
         parser::parse_vrml_reader(reader)
     };
     if let Some(progress) = &read_progress {
-        progress.finish_and_clear();
+        progress.finish();
     }
     let statements = parse_result?;
+    let read_elapsed = read_started_at.elapsed();
 
     let convert_progress = create_count_progress_bar(
         "Converting",
         statement_count(&statements) as u64,
         args.progress,
     )?;
+    let convert_started_at = Instant::now();
     let mut on_convert_progress = || {
         if let Some(progress) = &convert_progress {
             progress.inc(1);
@@ -101,10 +106,12 @@ pub fn run(args: CliArgs) -> Result<(), VrmlError> {
         converter::convert(&statements)
     };
     if let Some(progress) = &convert_progress {
-        progress.finish_and_clear();
+        progress.finish();
     }
     let nodes = convert_result?;
+    let convert_elapsed = convert_started_at.elapsed();
 
+    let write_started_at = Instant::now();
     if let Some(output_path) = args.output {
         if args.verbose {
             eprintln!("INFO vrml1tovrml2: Writing output file {}", output_path.display());
@@ -113,6 +120,10 @@ pub fn run(args: CliArgs) -> Result<(), VrmlError> {
     } else {
         write_stdout(&nodes, args.progress)?;
     }
+    let write_elapsed = write_started_at.elapsed();
+    let total_elapsed = total_started_at.elapsed();
+
+    print_timing_summary(read_elapsed, convert_elapsed, write_elapsed, total_elapsed);
 
     Ok(())
 }
@@ -130,7 +141,11 @@ fn write_output_file(
 ) -> Result<(), VrmlError> {
     let file = File::create(path)?;
     let mut writer = BufWriter::new(file);
-    let write_progress = create_count_progress_bar("Writing", nodes.len() as u64, progress_enabled)?;
+    let write_progress = create_count_progress_bar(
+        "Writing",
+        crate::writer::VrmlWriter::count_nodes(nodes) as u64,
+        progress_enabled,
+    )?;
     let mut on_write_progress = || {
         if let Some(progress) = &write_progress {
             progress.inc(1);
@@ -147,7 +162,7 @@ fn write_output_file(
     )?;
     writer.flush()?;
     if let Some(progress) = &write_progress {
-        progress.finish_and_clear();
+        progress.finish();
     }
     Ok(())
 }
@@ -158,7 +173,11 @@ fn write_stdout(
     progress_enabled: bool,
 ) -> Result<(), VrmlError> {
     let mut stdout = io::stdout().lock();
-    let write_progress = create_count_progress_bar("Writing", nodes.len() as u64, progress_enabled)?;
+    let write_progress = create_count_progress_bar(
+        "Writing",
+        crate::writer::VrmlWriter::count_nodes(nodes) as u64,
+        progress_enabled,
+    )?;
     let mut on_write_progress = || {
         if let Some(progress) = &write_progress {
             progress.inc(1);
@@ -175,7 +194,7 @@ fn write_stdout(
     )?;
     stdout.flush()?;
     if let Some(progress) = &write_progress {
-        progress.finish_and_clear();
+        progress.finish();
     }
     Ok(())
 }
@@ -235,5 +254,32 @@ fn count_statement(statement: &crate::model::Statement) -> usize {
         crate::model::Statement::Node(node) => {
             1 + node.children.iter().map(count_statement).sum::<usize>()
         }
+    }
+}
+
+/// Print one end-of-run timing summary for the major pipeline stages.
+fn print_timing_summary(
+    read_elapsed: Duration,
+    convert_elapsed: Duration,
+    write_elapsed: Duration,
+    total_elapsed: Duration,
+) {
+    eprintln!(
+        "Timing: reading/parsing={} converting={} writing={} total={}",
+        format_duration(read_elapsed),
+        format_duration(convert_elapsed),
+        format_duration(write_elapsed),
+        format_duration(total_elapsed),
+    );
+}
+
+/// Format a duration for compact human-readable timing output.
+fn format_duration(duration: Duration) -> String {
+    if duration.as_secs() >= 1 {
+        format!("{:.3}s", duration.as_secs_f64())
+    } else if duration.as_millis() >= 1 {
+        format!("{}ms", duration.as_millis())
+    } else {
+        format!("{}us", duration.as_micros())
     }
 }

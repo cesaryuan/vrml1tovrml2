@@ -28,10 +28,7 @@ impl VrmlWriter {
             if index > 0 {
                 writer.write_all(b"\n\n")?;
             }
-            writer.write_all(Self::render_node(node, 0).as_bytes())?;
-            if let Some(callback) = on_progress.as_mut() {
-                callback();
-            }
+            writer.write_all(Self::render_node_with_progress(node, 0, &mut on_progress).as_bytes())?;
         }
 
         writer.write_all(b"\n")?;
@@ -48,6 +45,15 @@ impl VrmlWriter {
 
     /// Render one node with indentation that matches the Python writer.
     fn render_node(node: &OutNode, indent: usize) -> String {
+        Self::render_node_with_progress(node, indent, &mut None)
+    }
+
+    /// Render one node with indentation and optionally advance write progress.
+    fn render_node_with_progress(
+        node: &OutNode,
+        indent: usize,
+        on_progress: &mut Option<&mut dyn FnMut()>,
+    ) -> String {
         let prefix = Self::indent(indent);
         let mut header = node.node_type.clone();
         if let Some(def_name) = &node.def_name {
@@ -55,23 +61,34 @@ impl VrmlWriter {
         }
 
         if node.fields.is_empty() {
+            if let Some(callback) = on_progress.as_mut() {
+                callback();
+            }
             return format!("{prefix}{header} {{\n{prefix}}}");
         }
 
         let mut lines = vec![format!("{prefix}{header} {{")];
         for (field_name, value) in &node.fields {
-            lines.extend(Self::render_field(field_name, value, indent + 2));
+            lines.extend(Self::render_field(field_name, value, indent + 2, on_progress));
         }
         lines.push(format!("{prefix}}}"));
+        if let Some(callback) = on_progress.as_mut() {
+            callback();
+        }
         lines.join("\n")
     }
 
     /// Render one field assignment and its nested structure when needed.
-    fn render_field(field_name: &str, value: &Value, indent: usize) -> Vec<String> {
+    fn render_field(
+        field_name: &str,
+        value: &Value,
+        indent: usize,
+        on_progress: &mut Option<&mut dyn FnMut()>,
+    ) -> Vec<String> {
         let prefix = Self::indent(indent);
         match value {
             Value::Node(node) => {
-                let node_lines = Self::render_node(node, indent + 2)
+                let node_lines = Self::render_node_with_progress(node, indent + 2, on_progress)
                     .lines()
                     .map(ToOwned::to_owned)
                     .collect::<Vec<_>>();
@@ -87,7 +104,7 @@ impl VrmlWriter {
             Value::List(values) if values.iter().all(Self::is_node_like) => {
                 let mut lines = vec![format!("{prefix}{field_name} [")];
                 for (index, item) in values.iter().enumerate() {
-                    let mut rendered_item = Self::render_node_like(item, indent + 2);
+                    let mut rendered_item = Self::render_node_like(item, indent + 2, on_progress);
                     if index + 1 < values.len() {
                         if let Some(last) = rendered_item.last_mut() {
                             last.push(',');
@@ -115,14 +132,41 @@ impl VrmlWriter {
     }
 
     /// Render a node-like list item.
-    fn render_node_like(value: &Value, indent: usize) -> Vec<String> {
+    fn render_node_like(
+        value: &Value,
+        indent: usize,
+        on_progress: &mut Option<&mut dyn FnMut()>,
+    ) -> Vec<String> {
         match value {
-            Value::Node(node) => Self::render_node(node, indent)
+            Value::Node(node) => Self::render_node_with_progress(node, indent, on_progress)
                 .lines()
                 .map(ToOwned::to_owned)
                 .collect(),
             Value::Use(use_ref) => vec![format!("{}USE {}", Self::indent(indent), use_ref.name)],
             _ => vec![format!("{}{}", Self::indent(indent), Self::render_scalar(value))],
+        }
+    }
+
+    /// Count all output nodes recursively for write-progress sizing.
+    pub fn count_nodes(nodes: &[OutNode]) -> usize {
+        nodes.iter().map(Self::count_node).sum()
+    }
+
+    /// Count one output node and all nested child nodes.
+    fn count_node(node: &OutNode) -> usize {
+        1 + node
+            .fields
+            .iter()
+            .map(|(_, value)| Self::count_value_nodes(value))
+            .sum::<usize>()
+    }
+
+    /// Count nested nodes reachable from one field value.
+    fn count_value_nodes(value: &Value) -> usize {
+        match value {
+            Value::Node(node) => Self::count_node(node),
+            Value::List(values) => values.iter().map(Self::count_value_nodes).sum(),
+            _ => 0,
         }
     }
 
