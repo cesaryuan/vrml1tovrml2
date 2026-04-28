@@ -63,11 +63,7 @@ impl<R: Read> CharReader<R> {
         if position >= self.buffer.len() {
             return Ok(None);
         }
-        Ok(self
-            .buffer
-            .as_bytes()
-            .get(position)
-            .map(|byte| *byte as char))
+        Ok(self.buffer.as_bytes().get(position).map(|byte| *byte as char))
     }
 
     /// Consume and return the next character.
@@ -389,7 +385,7 @@ impl<I: Iterator<Item = Result<Token, VrmlError>>> Parser<I> {
                 Statement::Use(_) => {
                     return Err(VrmlError::from(format!(
                         "DEF {def_name} must target a node"
-                    )));
+                    )))
                 }
             };
             node.def_name = Some(def_name);
@@ -408,9 +404,7 @@ impl<I: Iterator<Item = Result<Token, VrmlError>>> Parser<I> {
 
     /// Parse one node with fields and child statements.
     fn parse_node(&mut self) -> Result<AstNode, VrmlError> {
-        let node_type = self
-            .consume(TokenKind::Identifier, "Expected node type")?
-            .value;
+        let node_type = self.consume(TokenKind::Identifier, "Expected node type")?.value;
         self.consume_symbol("{", &format!("Expected '{{' after node type {node_type}"))?;
 
         let mut fields = BTreeMap::new();
@@ -477,7 +471,11 @@ impl<I: Iterator<Item = Result<Token, VrmlError>>> Parser<I> {
     }
 
     /// Parse a best-effort value form for less structured fields.
-    fn parse_auto_value(&mut self, _node_type: &str, field_name: &str) -> Result<Value, VrmlError> {
+    fn parse_auto_value(
+        &mut self,
+        _node_type: &str,
+        field_name: &str,
+    ) -> Result<Value, VrmlError> {
         if self.match_identifier("DEF")? {
             let def_name = self
                 .consume(TokenKind::Identifier, "Expected name after DEF")?
@@ -487,9 +485,9 @@ impl<I: Iterator<Item = Result<Token, VrmlError>>> Parser<I> {
                     node.def_name = Some(def_name);
                     Ok(Value::Node(Box::new(convert_ast_node_to_out_node(node)?)))
                 }
-                Statement::Use(_) => Err(VrmlError::from(format!(
-                    "DEF {def_name} must target a node"
-                ))),
+                Statement::Use(_) => {
+                    Err(VrmlError::from(format!("DEF {def_name} must target a node")))
+                }
             };
         }
 
@@ -585,9 +583,7 @@ impl<I: Iterator<Item = Result<Token, VrmlError>>> Parser<I> {
         match token.value.to_ascii_uppercase().as_str() {
             "TRUE" => Ok(Value::Bool(true)),
             "FALSE" => Ok(Value::Bool(false)),
-            other => Err(VrmlError::from(format!(
-                "Illegal value for QvSFBool: {other}"
-            ))),
+            other => Err(VrmlError::from(format!("Illegal value for QvSFBool: {other}"))),
         }
     }
 
@@ -636,7 +632,11 @@ impl<I: Iterator<Item = Result<Token, VrmlError>>> Parser<I> {
     }
 
     /// Parse one numeric item from a multi-value field.
-    fn parse_multi_numeric_item(&mut self, arity: usize, floats: bool) -> Result<Value, VrmlError> {
+    fn parse_multi_numeric_item(
+        &mut self,
+        arity: usize,
+        floats: bool,
+    ) -> Result<Value, VrmlError> {
         if arity == 1 {
             return if floats {
                 Ok(Value::Float(self.parse_float("Expected numeric value")?))

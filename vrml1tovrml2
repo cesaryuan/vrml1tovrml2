@@ -10,4 +10,4 @@ if [[ -f "${HOME}/.cargo/env" ]]; then
   . "${HOME}/.cargo/env"
 fi
 
-exec cargo run --release --quiet --manifest-path "${SCRIPT_DIR}/Cargo.toml" -- "$@"
+exec cargo run --quiet --manifest-path "${SCRIPT_DIR}/Cargo.toml" -- "$@"

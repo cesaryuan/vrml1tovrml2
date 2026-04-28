@@ -1,19 +1,10 @@
 //! VRML 2.0 text serialization for Rust output nodes.
 
-use std::fmt::Write as FmtWrite;
 use std::io::{self, Write};
-
-use rayon::prelude::*;
 
 use crate::model::{OutNode, Value};
 
 const VRML2_HEADER: &str = "#VRML V2.0 utf8";
-/// Avoid parallel setup overhead for short scalar lists.
-const PARALLEL_SCALAR_LIST_THRESHOLD: usize = 4_096;
-/// Avoid parallel setup overhead for short node-like lists.
-const PARALLEL_NODE_LIST_THRESHOLD: usize = 64;
-/// Keep scalar list chunk strings reasonably large for Rayon workers.
-const PARALLEL_SCALAR_LIST_CHUNK_SIZE: usize = 2_048;
 
 /// Serialize VRML 2.0 output nodes into textual `.wrl` content.
 pub struct VrmlWriter;
@@ -137,10 +128,29 @@ impl<'a, W: Write> WriterState<'a, W> {
                 write!(self.writer, "USE {}", use_ref.name)?;
             }
             Value::List(values) if values.iter().all(is_node_like) => {
-                self.write_node_like_list(values, indent)?;
+                self.writer.write_all(b" [\n")?;
+                for (index, item) in values.iter().enumerate() {
+                    self.write_node_like(item, indent + 2)?;
+                    if index + 1 < values.len() {
+                        self.writer.write_all(b",")?;
+                    }
+                    self.writer.write_all(b"\n")?;
+                }
+                self.write_indent(indent)?;
+                self.writer.write_all(b"]")?;
             }
             Value::List(values) => {
-                self.write_scalar_list(values, indent)?;
+                self.writer.write_all(b" [\n")?;
+                for (index, item) in values.iter().enumerate() {
+                    self.write_indent(indent + 2)?;
+                    self.write_scalar(item)?;
+                    if index + 1 < values.len() {
+                        self.writer.write_all(b",")?;
+                    }
+                    self.writer.write_all(b"\n")?;
+                }
+                self.write_indent(indent)?;
+                self.writer.write_all(b"]")?;
             }
             _ => {
                 self.writer.write_all(b" ")?;
@@ -149,45 +159,6 @@ impl<'a, W: Write> WriterState<'a, W> {
         }
 
         self.writer.write_all(b"\n")?;
-        Ok(())
-    }
-
-    /// Write one node-like list, parallelizing large independent child renders when safe.
-    fn write_node_like_list(&mut self, values: &[Value], indent: usize) -> io::Result<()> {
-        if self.can_parallelize() && values.len() >= PARALLEL_NODE_LIST_THRESHOLD {
-            return self.write_node_like_list_parallel(values, indent);
-        }
-
-        self.writer.write_all(b" [\n")?;
-        for (index, item) in values.iter().enumerate() {
-            self.write_node_like(item, indent + 2)?;
-            if index + 1 < values.len() {
-                self.writer.write_all(b",")?;
-            }
-            self.writer.write_all(b"\n")?;
-        }
-        self.write_indent(indent)?;
-        self.writer.write_all(b"]")?;
-        Ok(())
-    }
-
-    /// Write one scalar list, parallelizing large numeric payloads when progress is disabled.
-    fn write_scalar_list(&mut self, values: &[Value], indent: usize) -> io::Result<()> {
-        if self.can_parallelize() && values.len() >= PARALLEL_SCALAR_LIST_THRESHOLD {
-            return self.write_scalar_list_parallel(values, indent);
-        }
-
-        self.writer.write_all(b" [\n")?;
-        for (index, item) in values.iter().enumerate() {
-            self.write_indent(indent + 2)?;
-            self.write_scalar(item)?;
-            if index + 1 < values.len() {
-                self.writer.write_all(b",")?;
-            }
-            self.writer.write_all(b"\n")?;
-        }
-        self.write_indent(indent)?;
-        self.writer.write_all(b"]")?;
         Ok(())
     }
 
@@ -249,202 +220,11 @@ impl<'a, W: Write> WriterState<'a, W> {
             callback();
         }
     }
-
-    /// Return whether the current writer state can safely use parallel rendering helpers.
-    fn can_parallelize(&self) -> bool {
-        self.on_progress.is_none()
-    }
-
-    /// Write one large node-like list by rendering each child subtree on a Rayon worker.
-    fn write_node_like_list_parallel(&mut self, values: &[Value], indent: usize) -> io::Result<()> {
-        let rendered_items = values
-            .par_iter()
-            .map(|value| render_node_like(value, indent + 2))
-            .collect::<Vec<_>>();
-
-        self.writer.write_all(b" [\n")?;
-        for (index, rendered) in rendered_items.iter().enumerate() {
-            self.writer.write_all(rendered.as_bytes())?;
-            if index + 1 < rendered_items.len() {
-                self.writer.write_all(b",")?;
-            }
-            self.writer.write_all(b"\n")?;
-        }
-        self.write_indent(indent)?;
-        self.writer.write_all(b"]")?;
-        Ok(())
-    }
-
-    /// Write one large scalar list by rendering chunks in parallel before streaming them out.
-    fn write_scalar_list_parallel(&mut self, values: &[Value], indent: usize) -> io::Result<()> {
-        let rendered_chunks = values
-            .par_chunks(PARALLEL_SCALAR_LIST_CHUNK_SIZE)
-            .enumerate()
-            .map(|(chunk_index, chunk)| render_scalar_chunk(chunk, indent + 2, chunk_index > 0))
-            .collect::<Vec<_>>();
-
-        self.writer.write_all(b" [\n")?;
-        for rendered in rendered_chunks {
-            self.writer.write_all(rendered.as_bytes())?;
-        }
-        self.write_indent(indent)?;
-        self.writer.write_all(b"]")?;
-        Ok(())
-    }
 }
 
 /// Return whether a value should render as a nested node block.
 fn is_node_like(value: &Value) -> bool {
     matches!(value, Value::Node(_) | Value::Use(_))
-}
-
-/// Render one node-like list item into a standalone string for parallel write assembly.
-fn render_node_like(value: &Value, indent: usize) -> String {
-    match value {
-        Value::Node(node) => render_node(node, indent),
-        Value::Use(use_ref) => {
-            let mut output = String::new();
-            push_indent(&mut output, indent);
-            let _ = write!(output, "USE {}", use_ref.name);
-            output
-        }
-        _ => {
-            let mut output = String::new();
-            push_indent(&mut output, indent);
-            output.push_str(&render_scalar(value));
-            output
-        }
-    }
-}
-
-/// Render one full node subtree into a standalone string for parallel write assembly.
-fn render_node(node: &OutNode, indent: usize) -> String {
-    let mut output = String::new();
-    push_indent(&mut output, indent);
-    if let Some(def_name) = &node.def_name {
-        let _ = write!(output, "DEF {def_name} {} ", node.node_type);
-    } else {
-        let _ = write!(output, "{} ", node.node_type);
-    }
-
-    if node.fields.is_empty() {
-        output.push_str("{\n");
-        push_indent(&mut output, indent);
-        output.push('}');
-        return output;
-    }
-
-    output.push_str("{\n");
-    for (field_name, value) in &node.fields {
-        output.push_str(&render_field(field_name, value, indent + 2));
-        output.push('\n');
-    }
-    push_indent(&mut output, indent);
-    output.push('}');
-    output
-}
-
-/// Render one field assignment into a standalone string for parallel write assembly.
-fn render_field(field_name: &str, value: &Value, indent: usize) -> String {
-    let mut output = String::new();
-    push_indent(&mut output, indent);
-    output.push_str(field_name);
-
-    match value {
-        Value::Node(node) => {
-            output.push('\n');
-            output.push_str(&render_node(node, indent + 2));
-        }
-        Value::Use(use_ref) => {
-            output.push('\n');
-            push_indent(&mut output, indent + 2);
-            let _ = write!(output, "USE {}", use_ref.name);
-        }
-        Value::List(values) if values.iter().all(is_node_like) => {
-            output.push_str(" [\n");
-            for (index, item) in values.iter().enumerate() {
-                output.push_str(&render_node_like(item, indent + 2));
-                if index + 1 < values.len() {
-                    output.push(',');
-                }
-                output.push('\n');
-            }
-            push_indent(&mut output, indent);
-            output.push(']');
-        }
-        Value::List(values) => {
-            output.push_str(" [\n");
-            for (index, item) in values.iter().enumerate() {
-                push_indent(&mut output, indent + 2);
-                output.push_str(&render_scalar(item));
-                if index + 1 < values.len() {
-                    output.push(',');
-                }
-                output.push('\n');
-            }
-            push_indent(&mut output, indent);
-            output.push(']');
-        }
-        _ => {
-            output.push(' ');
-            output.push_str(&render_scalar(value));
-        }
-    }
-
-    output
-}
-
-/// Render one chunk from a large scalar list, optionally prefixing a newline between chunks.
-fn render_scalar_chunk(values: &[Value], indent: usize, prefix_newline: bool) -> String {
-    let mut output = String::new();
-    if prefix_newline {
-        output.push('\n');
-    }
-    for (index, value) in values.iter().enumerate() {
-        if index > 0 {
-            output.push('\n');
-        }
-        push_indent(&mut output, indent);
-        output.push_str(&render_scalar(value));
-        output.push(',');
-    }
-    if output.ends_with(',') {
-        output.pop();
-    }
-    output.push('\n');
-    output
-}
-
-/// Render one scalar value or vector into a standalone string.
-fn render_scalar(value: &Value) -> String {
-    match value {
-        Value::Bool(value) => {
-            if *value {
-                "TRUE".to_owned()
-            } else {
-                "FALSE".to_owned()
-            }
-        }
-        Value::Int(value) => value.to_string(),
-        Value::Float(value) => format_number(*value),
-        Value::String(value) => format!("\"{value}\""),
-        Value::Identifier(value) => value.clone(),
-        Value::Vec(values) => values
-            .iter()
-            .map(|value| format_number(*value))
-            .collect::<Vec<_>>()
-            .join(" "),
-        Value::List(_) => "[]".to_owned(),
-        Value::Node(node) => render_node(node, 0),
-        Value::Use(use_ref) => format!("USE {}", use_ref.name),
-    }
-}
-
-/// Append one indentation level sequence using tabs like the streaming writer.
-fn push_indent(output: &mut String, indent: usize) {
-    for _ in 0..(indent / 2) {
-        output.push('\t');
-    }
 }
 
 /// Format a float without noisy trailing zeros.

@@ -39,10 +39,7 @@ pub fn parse_args(argv: impl IntoIterator<Item = String>) -> Result<CliArgs, Vrm
             "--progress" => progress = true,
             "--help" | "-h" => return Err(VrmlError::from(usage())),
             _ if arg.starts_with('-') => {
-                return Err(VrmlError::from(format!(
-                    "Unknown option: {arg}\n\n{}",
-                    usage()
-                )));
+                return Err(VrmlError::from(format!("Unknown option: {arg}\n\n{}", usage())))
             }
             _ => positional.push(arg),
         }
@@ -73,10 +70,7 @@ pub fn run(args: CliArgs) -> Result<(), VrmlError> {
     }
 
     if args.verbose {
-        eprintln!(
-            "INFO vrml1tovrml2: Reading input file {}",
-            args.input.display()
-        );
+        eprintln!("INFO vrml1tovrml2: Reading input file {}", args.input.display());
     }
 
     let input_file = File::open(&args.input)?;
@@ -120,10 +114,7 @@ pub fn run(args: CliArgs) -> Result<(), VrmlError> {
     let write_started_at = Instant::now();
     if let Some(output_path) = args.output {
         if args.verbose {
-            eprintln!(
-                "INFO vrml1tovrml2: Writing output file {}",
-                output_path.display()
-            );
+            eprintln!("INFO vrml1tovrml2: Writing output file {}", output_path.display());
         }
         write_output_file(&output_path, &nodes, args.progress)?;
     } else {
@@ -177,7 +168,10 @@ fn write_output_file(
 }
 
 /// Write output text to stdout.
-fn write_stdout(nodes: &[crate::model::OutNode], progress_enabled: bool) -> Result<(), VrmlError> {
+fn write_stdout(
+    nodes: &[crate::model::OutNode],
+    progress_enabled: bool,
+) -> Result<(), VrmlError> {
     let mut stdout = io::stdout().lock();
     let write_progress = create_count_progress_bar(
         "Writing",
@@ -237,9 +231,10 @@ fn create_count_progress_bar(
     }
 
     let safe_total = total.max(1);
-    let style =
-        ProgressStyle::with_template("{msg:<12} [{wide_bar}] {pos:>6}/{len:<6} ({percent:>3}%)")
-            .map_err(|error| VrmlError::from(format!("Invalid progress style: {error}")))?;
+    let style = ProgressStyle::with_template(
+        "{msg:<12} [{wide_bar}] {pos:>6}/{len:<6} ({percent:>3}%)",
+    )
+    .map_err(|error| VrmlError::from(format!("Invalid progress style: {error}")))?;
 
     let progress_bar = ProgressBar::new(safe_total);
     progress_bar.set_style(style);
