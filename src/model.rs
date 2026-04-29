@@ -103,20 +103,28 @@ pub enum FieldKind {
     Int,
     /// Float scalar.
     Float,
+    /// String scalar.
+    String,
     /// Two-component vector.
     Vec2,
     /// Three-component vector.
     Vec3,
     /// Four-component rotation vector.
     Rotation,
+    /// Fixed-size matrix list.
+    Matrix,
     /// Multi-value integer list.
     MfInt,
     /// Multi-value float list.
     MfFloat,
+    /// Multi-value 2D vector list.
+    MfVec2,
     /// Multi-value 3D vector list.
     MfVec3,
     /// Multi-value string list.
     MfString,
+    /// Symbolic bitmask value.
+    Bitmask,
     /// Identifier-like enum or symbol.
     Enum,
     /// Best-effort fallback parsing.

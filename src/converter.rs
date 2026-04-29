@@ -46,6 +46,12 @@ struct TransformSpec {
 enum TransformKind {
     /// Translation transform.
     Translation,
+    /// Rotation transform.
+    Rotation,
+    /// Scale transform.
+    Scale,
+    /// Matrix transform approximated through supported VRML 2.0 fields.
+    Matrix,
 }
 
 /// Hold the current material state for geometry conversion.
@@ -74,6 +80,12 @@ enum DefinitionValue {
     Coordinate(OutNode),
     /// A normal definition that affects future shapes.
     Normal(OutNode),
+    /// A texture coordinate definition that affects future geometry.
+    TextureCoordinate(OutNode),
+    /// A texture definition that affects future appearance state.
+    Texture(OutNode),
+    /// A texture transform definition that affects future appearance state.
+    TextureTransform(OutNode),
     /// A font style definition that affects future text.
     FontStyle(OutNode),
     /// A directly emitted output node name that can later be referenced by `USE`.
@@ -97,6 +109,12 @@ struct ConversionState {
     coordinate: Option<NodeRef>,
     /// Active normal node.
     normal: Option<NodeRef>,
+    /// Active texture coordinate node.
+    tex_coord: Option<NodeRef>,
+    /// Active texture node.
+    texture: Option<NodeRef>,
+    /// Active texture transform node.
+    texture_transform: Option<NodeRef>,
     /// Active font style node.
     font_style: Option<NodeRef>,
     /// Shared `DEF` definitions visible to later statements.
@@ -144,36 +162,42 @@ impl<'a> Converter<'a> {
 
     /// Wrap the scene in `Collision` and `Group` nodes like the Python converter.
     fn wrap_root(&self, nodes: Vec<OutNode>) -> OutNode {
-        let group_children = if nodes.len() == 1 && nodes[0].node_type == "Group" && nodes[0].def_name.is_none() {
-            nodes[0]
-                .fields
-                .iter()
-                .find_map(|(name, value)| {
-                    if name == "children" {
-                        if let Value::List(values) = value {
-                            return Some(
-                                values
-                                    .iter()
-                                    .filter_map(|value| match value {
-                                        Value::Node(node) => Some((**node).clone()),
-                                        _ => None,
-                                    })
-                                    .collect::<Vec<_>>(),
-                            );
+        let group_children =
+            if nodes.len() == 1 && nodes[0].node_type == "Group" && nodes[0].def_name.is_none() {
+                nodes[0]
+                    .fields
+                    .iter()
+                    .find_map(|(name, value)| {
+                        if name == "children" {
+                            if let Value::List(values) = value {
+                                return Some(
+                                    values
+                                        .iter()
+                                        .filter_map(|value| match value {
+                                            Value::Node(node) => Some((**node).clone()),
+                                            _ => None,
+                                        })
+                                        .collect::<Vec<_>>(),
+                                );
+                            }
                         }
-                    }
-                    None
-                })
-                .unwrap_or(nodes)
-        } else {
-            nodes
-        };
+                        None
+                    })
+                    .unwrap_or(nodes)
+            } else {
+                nodes
+            };
 
         let mut group = OutNode::new("Group");
-        group.fields.push(("children".to_owned(), Value::List(node_list(group_children))));
+        group.fields.push((
+            "children".to_owned(),
+            Value::List(node_list(group_children)),
+        ));
 
         let mut collision = OutNode::new("Collision");
-        collision.fields.push(("collide".to_owned(), Value::Bool(false)));
+        collision
+            .fields
+            .push(("collide".to_owned(), Value::Bool(false)));
         collision
             .fields
             .push(("children".to_owned(), Value::List(node_list(vec![group]))));
@@ -246,6 +270,21 @@ impl<'a> Converter<'a> {
                 state.normal = Some(self.register_node_definition(node, out, state));
                 Ok(Vec::new())
             }
+            "TextureCoordinate2" => {
+                let out = self.simple_out_node(node, "TextureCoordinate");
+                state.tex_coord = Some(self.register_node_definition(node, out, state));
+                Ok(Vec::new())
+            }
+            "Texture2" => {
+                let out = self.convert_texture(node);
+                state.texture = Some(self.register_node_definition(node, out, state));
+                Ok(Vec::new())
+            }
+            "Texture2Transform" | "Texture2Transformation" => {
+                let out = self.convert_texture_transform(node);
+                state.texture_transform = Some(self.register_node_definition(node, out, state));
+                Ok(Vec::new())
+            }
             "FontStyle" => {
                 let out = self.convert_font_style(node);
                 state.font_style = Some(self.register_node_definition(node, out, state));
@@ -260,24 +299,96 @@ impl<'a> Converter<'a> {
                 }
                 Ok(Vec::new())
             }
+            "Rotation" => {
+                if let Some(value) = node.fields.get("rotation") {
+                    state.transforms.push(TransformSpec {
+                        kind: TransformKind::Rotation,
+                        value: value.clone(),
+                    });
+                }
+                Ok(Vec::new())
+            }
+            "Scale" => {
+                if let Some(value) = node.fields.get("scaleFactor") {
+                    state.transforms.push(TransformSpec {
+                        kind: TransformKind::Scale,
+                        value: value.clone(),
+                    });
+                }
+                Ok(Vec::new())
+            }
+            "MatrixTransform" => {
+                if let Some(value) = node.fields.get("matrix") {
+                    state.transforms.push(TransformSpec {
+                        kind: TransformKind::Matrix,
+                        value: value.clone(),
+                    });
+                }
+                Ok(Vec::new())
+            }
+            "Transform" => {
+                for (field_name, kind) in [
+                    ("translation", TransformKind::Translation),
+                    ("rotation", TransformKind::Rotation),
+                    ("scaleFactor", TransformKind::Scale),
+                ] {
+                    if let Some(value) = node.fields.get(field_name) {
+                        state.transforms.push(TransformSpec {
+                            kind: kind.clone(),
+                            value: value.clone(),
+                        });
+                    }
+                }
+                Ok(Vec::new())
+            }
             "Separator" | "Group" | "TransformSeparator" => self.convert_group_like(node, state),
-            "PerspectiveCamera" => {
+            "Switch" => {
+                let transforms = state.transforms.clone();
+                let switched = self.convert_switch(node, state)?;
+                let emitted = self.wrap_transforms(switched, &transforms);
+                Ok(vec![self.store_emitted_definition(emitted, state)])
+            }
+            "WWWAnchor" => {
+                let transforms = state.transforms.clone();
+                let anchor = self.convert_anchor(node, state)?;
+                let emitted = self.wrap_transforms(anchor, &transforms);
+                Ok(vec![self.store_emitted_definition(emitted, state)])
+            }
+            "WWWInline" => {
+                let transforms = state.transforms.clone();
+                let inline = self.convert_inline(node);
+                let emitted = self.wrap_transforms(inline, &transforms);
+                Ok(vec![self.store_emitted_definition(emitted, state)])
+            }
+            "LOD" => {
+                let transforms = state.transforms.clone();
+                let lod = self.convert_lod(node, state)?;
+                let emitted = self.wrap_transforms(lod, &transforms);
+                Ok(vec![self.store_emitted_definition(emitted, state)])
+            }
+            "PerspectiveCamera" | "OrthographicCamera" => {
                 let transforms = state.transforms.clone();
                 let emitted = self.wrap_transforms(self.convert_camera(node), &transforms);
                 Ok(vec![self.store_emitted_definition(emitted, state)])
             }
-            "DirectionalLight" => {
+            "DirectionalLight" | "PointLight" | "SpotLight" => {
                 let transforms = state.transforms.clone();
                 let emitted = self.wrap_transforms(self.convert_light(node), &transforms);
                 Ok(vec![self.store_emitted_definition(emitted, state)])
             }
-            "IndexedFaceSet" | "Cube" | "AsciiText" | "IndexedLineSet" | "PointSet" => {
+            "IndexedFaceSet" | "Cube" | "AsciiText" | "IndexedLineSet" | "PointSet" | "Cone"
+            | "Cylinder" | "Sphere" => {
                 let transforms = state.transforms.clone();
                 let shape = self.convert_shape(node, state)?;
                 let emitted = self.wrap_transforms(shape, &transforms);
                 Ok(vec![self.store_emitted_definition(emitted, state)])
             }
-            other => Err(VrmlError::from(format!("Unsupported node type in Rust converter: {other}"))),
+            "Background" => {
+                let emitted = self.simple_out_node(node, "Background");
+                Ok(vec![self.store_emitted_definition(emitted, state)])
+            }
+            "Info" => Ok(Vec::new()),
+            _ => Ok(Vec::new()),
         }
     }
 
@@ -316,8 +427,97 @@ impl<'a> Converter<'a> {
         )])
     }
 
+    /// Convert a VRML 1.0 `Switch` node into a VRML 2.0 `Switch`.
+    fn convert_switch(
+        &mut self,
+        node: &AstNode,
+        state: &mut ConversionState,
+    ) -> Result<OutNode, VrmlError> {
+        let mut child_state = state.clone();
+        child_state.transforms.clear();
+        let children = self.convert_sequence(&node.children, &mut child_state)?;
+        let mut out = OutNode::new("Switch");
+        out.def_name = node.def_name.clone();
+        out.fields.push((
+            "whichChoice".to_owned(),
+            Value::Int(
+                self.int_field_from_value(node.fields.get("whichChild"))
+                    .unwrap_or(-1),
+            ),
+        ));
+        out.fields
+            .push(("choice".to_owned(), Value::List(node_list(children))));
+        Ok(out)
+    }
+
+    /// Convert a VRML 1.0 `WWWAnchor` node into a VRML 2.0 `Anchor`.
+    fn convert_anchor(
+        &mut self,
+        node: &AstNode,
+        state: &mut ConversionState,
+    ) -> Result<OutNode, VrmlError> {
+        let mut child_state = state.clone();
+        child_state.transforms.clear();
+        let children = self.convert_sequence(&node.children, &mut child_state)?;
+        let mut out = OutNode::new("Anchor");
+        out.def_name = node.def_name.clone();
+        out.fields.push((
+            "url".to_owned(),
+            self.value_to_string_list(node.fields.get("name"))
+                .unwrap_or(Value::List(Vec::new())),
+        ));
+        if let Some(description) = self.string_value(node.fields.get("description")) {
+            out.fields
+                .push(("description".to_owned(), Value::String(description)));
+        }
+        out.fields
+            .push(("children".to_owned(), Value::List(node_list(children))));
+        Ok(out)
+    }
+
+    /// Convert a VRML 1.0 `WWWInline` node into a VRML 2.0 `Inline`.
+    fn convert_inline(&mut self, node: &AstNode) -> OutNode {
+        let mut out = OutNode::new("Inline");
+        out.def_name = node.def_name.clone();
+        out.fields.push((
+            "url".to_owned(),
+            self.value_to_string_list(node.fields.get("name"))
+                .unwrap_or(Value::List(Vec::new())),
+        ));
+        if let Some(value) = node.fields.get("bboxCenter") {
+            out.fields.push(("bboxCenter".to_owned(), value.clone()));
+        }
+        if let Some(value) = node.fields.get("bboxSize") {
+            out.fields.push(("bboxSize".to_owned(), value.clone()));
+        }
+        out
+    }
+
+    /// Convert a VRML 1.0 `LOD` node into a VRML 2.0 `LOD`.
+    fn convert_lod(
+        &mut self,
+        node: &AstNode,
+        state: &mut ConversionState,
+    ) -> Result<OutNode, VrmlError> {
+        let mut child_state = state.clone();
+        child_state.transforms.clear();
+        let children = self.convert_sequence(&node.children, &mut child_state)?;
+        let mut out = OutNode::new("LOD");
+        out.def_name = node.def_name.clone();
+        out.fields
+            .push(("level".to_owned(), Value::List(node_list(children))));
+        if let Some(value) = node.fields.get("range") {
+            out.fields.push(("range".to_owned(), value.clone()));
+        }
+        Ok(out)
+    }
+
     /// Convert a geometry node into a VRML 2.0 `Shape`.
-    fn convert_shape(&mut self, node: &AstNode, state: &mut ConversionState) -> Result<OutNode, VrmlError> {
+    fn convert_shape(
+        &mut self,
+        node: &AstNode,
+        state: &mut ConversionState,
+    ) -> Result<OutNode, VrmlError> {
         let geometry = self.convert_geometry(node, state)?;
         let appearance = self.build_appearance(state);
         let mut shape = OutNode::new("Shape");
@@ -332,7 +532,11 @@ impl<'a> Converter<'a> {
     }
 
     /// Convert the geometry-specific part of one shape node.
-    fn convert_geometry(&mut self, node: &AstNode, state: &mut ConversionState) -> Result<OutNode, VrmlError> {
+    fn convert_geometry(
+        &mut self,
+        node: &AstNode,
+        state: &mut ConversionState,
+    ) -> Result<OutNode, VrmlError> {
         match node.node_type.as_str() {
             "IndexedFaceSet" => self.convert_indexed_face_set(node, state),
             "IndexedLineSet" => self.convert_indexed_line_set(node, state),
@@ -349,8 +553,13 @@ impl<'a> Converter<'a> {
                 ));
                 Ok(out)
             }
+            "Cone" => Ok(self.convert_cone(node)),
+            "Cylinder" => Ok(self.convert_cylinder(node)),
+            "Sphere" => Ok(self.convert_sphere(node)),
             "AsciiText" => self.convert_ascii_text(node, state),
-            other => Err(VrmlError::from(format!("Unsupported geometry node {other}"))),
+            other => Err(VrmlError::from(format!(
+                "Unsupported geometry node {other}"
+            ))),
         }
     }
 
@@ -370,13 +579,19 @@ impl<'a> Converter<'a> {
             out.fields
                 .push(("normal".to_owned(), self.node_ref_to_value(normal)?));
         }
+        if let Some(tex_coord) = &state.tex_coord {
+            out.fields
+                .push(("texCoord".to_owned(), self.node_ref_to_value(tex_coord)?));
+        }
 
         if let Some((color_node, color_index)) = self.build_color_node(state, node)? {
             out.fields
                 .push(("color".to_owned(), Value::Node(Box::new(color_node))));
             if let Some(color_index) = color_index {
-                out.fields
-                    .push(("__pending_color_index__".to_owned(), Value::List(color_index)));
+                out.fields.push((
+                    "__pending_color_index__".to_owned(),
+                    Value::List(color_index),
+                ));
             }
         }
 
@@ -457,8 +672,10 @@ impl<'a> Converter<'a> {
             out.fields
                 .push(("color".to_owned(), Value::Node(Box::new(color_node))));
             if let Some(color_index) = color_index {
-                out.fields
-                    .push(("__pending_color_index__".to_owned(), Value::List(color_index)));
+                out.fields.push((
+                    "__pending_color_index__".to_owned(),
+                    Value::List(color_index),
+                ));
             }
         }
 
@@ -481,12 +698,18 @@ impl<'a> Converter<'a> {
     }
 
     /// Convert a VRML 1.0 `PointSet`.
-    fn convert_point_set(&mut self, node: &AstNode, state: &mut ConversionState) -> Result<OutNode, VrmlError> {
+    fn convert_point_set(
+        &mut self,
+        node: &AstNode,
+        state: &mut ConversionState,
+    ) -> Result<OutNode, VrmlError> {
         let mut out = OutNode::new("PointSet");
 
         if let Some(coordinate) = &state.coordinate {
-            out.fields
-                .push(("coord".to_owned(), self.slice_coordinate_value(coordinate, node)?));
+            out.fields.push((
+                "coord".to_owned(),
+                self.slice_coordinate_value(coordinate, node)?,
+            ));
         }
 
         if let Some((color_node, _)) = self.build_color_node(state, node)? {
@@ -497,15 +720,76 @@ impl<'a> Converter<'a> {
         Ok(out)
     }
 
+    /// Convert a VRML 1.0 `Cone`.
+    fn convert_cone(&self, node: &AstNode) -> OutNode {
+        let parts = self.bitmask_parts(node.fields.get("parts"), &["ALL"]);
+        let mut out = OutNode::new("Cone");
+        out.fields.push((
+            "bottomRadius".to_owned(),
+            Value::Float(self.float_field(node, "bottomRadius").unwrap_or(1.0)),
+        ));
+        out.fields.push((
+            "height".to_owned(),
+            Value::Float(self.float_field(node, "height").unwrap_or(2.0)),
+        ));
+        if !parts.iter().any(|part| part == "ALL" || part == "BOTTOM") {
+            out.fields.push(("bottom".to_owned(), Value::Bool(false)));
+        }
+        if !parts.iter().any(|part| part == "ALL" || part == "SIDES") {
+            out.fields.push(("side".to_owned(), Value::Bool(false)));
+        }
+        out
+    }
+
+    /// Convert a VRML 1.0 `Cylinder`.
+    fn convert_cylinder(&self, node: &AstNode) -> OutNode {
+        let parts = self.bitmask_parts(node.fields.get("parts"), &["ALL"]);
+        let mut out = OutNode::new("Cylinder");
+        out.fields.push((
+            "radius".to_owned(),
+            Value::Float(self.float_field(node, "radius").unwrap_or(1.0)),
+        ));
+        out.fields.push((
+            "height".to_owned(),
+            Value::Float(self.float_field(node, "height").unwrap_or(2.0)),
+        ));
+        if !parts.iter().any(|part| part == "ALL" || part == "BOTTOM") {
+            out.fields.push(("bottom".to_owned(), Value::Bool(false)));
+        }
+        if !parts.iter().any(|part| part == "ALL" || part == "TOP") {
+            out.fields.push(("top".to_owned(), Value::Bool(false)));
+        }
+        if !parts.iter().any(|part| part == "ALL" || part == "SIDES") {
+            out.fields.push(("side".to_owned(), Value::Bool(false)));
+        }
+        out
+    }
+
+    /// Convert a VRML 1.0 `Sphere`.
+    fn convert_sphere(&self, node: &AstNode) -> OutNode {
+        let mut out = OutNode::new("Sphere");
+        out.fields.push((
+            "radius".to_owned(),
+            Value::Float(self.float_field(node, "radius").unwrap_or(1.0)),
+        ));
+        out
+    }
+
     /// Convert a VRML 1.0 `AsciiText`.
-    fn convert_ascii_text(&mut self, node: &AstNode, state: &mut ConversionState) -> Result<OutNode, VrmlError> {
+    fn convert_ascii_text(
+        &mut self,
+        node: &AstNode,
+        state: &mut ConversionState,
+    ) -> Result<OutNode, VrmlError> {
         let mut out = OutNode::new("Text");
         out.fields.push((
             "string".to_owned(),
-            self.value_to_string_list(node.fields.get("string")).unwrap_or(Value::List(Vec::new())),
+            self.value_to_string_list(node.fields.get("string"))
+                .unwrap_or(Value::List(Vec::new())),
         ));
         if let Some(width) = self.float_field(node, "width") {
-            out.fields.push(("maxExtent".to_owned(), Value::Float(width)));
+            out.fields
+                .push(("maxExtent".to_owned(), Value::Float(width)));
         }
         if let Some(font_style) = self.merge_font_style(state, node)? {
             out.fields
@@ -524,7 +808,8 @@ impl<'a> Converter<'a> {
             out.fields.push(("orientation".to_owned(), value.clone()));
         }
         if let Some(value) = self.float_field(node, "heightAngle") {
-            out.fields.push(("fieldOfView".to_owned(), Value::Float(value)));
+            out.fields
+                .push(("fieldOfView".to_owned(), Value::Float(value)));
         }
         out.def_name = node.def_name.clone();
         out
@@ -532,8 +817,22 @@ impl<'a> Converter<'a> {
 
     /// Convert a VRML 1.0 light node to its VRML 2.0 counterpart.
     fn convert_light(&self, node: &AstNode) -> OutNode {
-        let mut out = OutNode::new("DirectionalLight");
-        for field_name in ["on", "intensity", "color", "direction"] {
+        let mut out = OutNode::new(node.node_type.as_str());
+        let field_names: &[&str] = match node.node_type.as_str() {
+            "DirectionalLight" => &["on", "intensity", "color", "direction"],
+            "PointLight" => &["on", "intensity", "color", "location"],
+            "SpotLight" => &[
+                "on",
+                "intensity",
+                "color",
+                "location",
+                "direction",
+                "dropOffRate",
+                "cutOffAngle",
+            ],
+            _ => &[],
+        };
+        for field_name in field_names.iter().copied() {
             if let Some(value) = node.fields.get(field_name) {
                 out.fields.push((field_name.to_owned(), value.clone()));
             }
@@ -547,6 +846,16 @@ impl<'a> Converter<'a> {
         let mut out = OutNode::new("Appearance");
         let material = self.material_reference_to_output(state.material.as_ref());
         out.fields.push(("material".to_owned(), material));
+        if let Some(texture) = &state.texture {
+            if let Ok(value) = self.node_ref_to_value(texture) {
+                out.fields.push(("texture".to_owned(), value));
+            }
+        }
+        if let Some(texture_transform) = &state.texture_transform {
+            if let Ok(value) = self.node_ref_to_value(texture_transform) {
+                out.fields.push(("textureTransform".to_owned(), value));
+            }
+        }
         out
     }
 
@@ -609,11 +918,14 @@ impl<'a> Converter<'a> {
         let ambient_intensity = (ambient.iter().sum::<f64>() / 3.0).clamp(0.0, 1.0);
 
         if (ambient_intensity - 0.2).abs() > 1e-9 {
-            out.fields
-                .push(("ambientIntensity".to_owned(), Value::Float(ambient_intensity)));
+            out.fields.push((
+                "ambientIntensity".to_owned(),
+                Value::Float(ambient_intensity),
+            ));
         }
         if diffuse != vec![0.8, 0.8, 0.8] {
-            out.fields.push(("diffuseColor".to_owned(), Value::Vec(diffuse)));
+            out.fields
+                .push(("diffuseColor".to_owned(), Value::Vec(diffuse)));
         }
         if let Some(specular) = material.specular_colors.first() {
             if *specular != vec![0.0, 0.0, 0.0] {
@@ -659,7 +971,10 @@ impl<'a> Converter<'a> {
             return Ok(None);
         }
         if material.diffuse_colors.len() == 1
-            && !matches!(geometry_node.node_type.as_str(), "IndexedLineSet" | "PointSet")
+            && !matches!(
+                geometry_node.node_type.as_str(),
+                "IndexedLineSet" | "PointSet"
+            )
         {
             return Ok(None);
         }
@@ -695,18 +1010,23 @@ impl<'a> Converter<'a> {
         state: &mut ConversionState,
     ) -> Result<MaterialRef, VrmlError> {
         let material = MaterialState {
-            ambient_colors: self.ensure_color_list(node.fields.get("ambientColor"), &[0.2, 0.2, 0.2])?,
-            diffuse_colors: self.ensure_color_list(node.fields.get("diffuseColor"), &[0.8, 0.8, 0.8])?,
-            specular_colors: self.ensure_color_list(node.fields.get("specularColor"), &[0.0, 0.0, 0.0])?,
-            emissive_colors: self.ensure_color_list(node.fields.get("emissiveColor"), &[0.0, 0.0, 0.0])?,
+            ambient_colors: self
+                .ensure_color_list(node.fields.get("ambientColor"), &[0.2, 0.2, 0.2])?,
+            diffuse_colors: self
+                .ensure_color_list(node.fields.get("diffuseColor"), &[0.8, 0.8, 0.8])?,
+            specular_colors: self
+                .ensure_color_list(node.fields.get("specularColor"), &[0.0, 0.0, 0.0])?,
+            emissive_colors: self
+                .ensure_color_list(node.fields.get("emissiveColor"), &[0.0, 0.0, 0.0])?,
             shininess: self.ensure_float_list(node.fields.get("shininess"), 0.2)?,
             transparency: self.ensure_float_list(node.fields.get("transparency"), 0.0)?,
         };
 
         if let Some(def_name) = &node.def_name {
-            state
-                .definitions
-                .insert(def_name.clone(), DefinitionValue::Material(material.clone()));
+            state.definitions.insert(
+                def_name.clone(),
+                DefinitionValue::Material(material.clone()),
+            );
             return Ok(MaterialRef::Defined(def_name.clone(), material));
         }
 
@@ -754,7 +1074,9 @@ impl<'a> Converter<'a> {
         }
 
         if let Some(spacing) = self.float_field(text_node, "spacing") {
-            merged.fields.push(("spacing".to_owned(), Value::Float(spacing)));
+            merged
+                .fields
+                .push(("spacing".to_owned(), Value::Float(spacing)));
         }
         if let Some(justification) = self.enum_value(text_node, "justification") {
             let mapped = match justification.to_ascii_uppercase().as_str() {
@@ -777,7 +1099,11 @@ impl<'a> Converter<'a> {
     }
 
     /// Slice coordinates for `PointSet startIndex/numPoints`.
-    fn slice_coordinate_value(&mut self, coordinate: &NodeRef, point_set: &AstNode) -> Result<Value, VrmlError> {
+    fn slice_coordinate_value(
+        &mut self,
+        coordinate: &NodeRef,
+        point_set: &AstNode,
+    ) -> Result<Value, VrmlError> {
         if let NodeRef::Defined(name, _) = coordinate {
             return Ok(Value::Use(UseRef { name: name.clone() }));
         }
@@ -785,7 +1111,13 @@ impl<'a> Converter<'a> {
         let point_values = source
             .fields
             .iter()
-            .find_map(|(name, value)| if name == "point" { Some(value.clone()) } else { None })
+            .find_map(|(name, value)| {
+                if name == "point" {
+                    Some(value.clone())
+                } else {
+                    None
+                }
+            })
             .unwrap_or(Value::List(Vec::new()));
 
         let points = match point_values {
@@ -820,7 +1152,39 @@ impl<'a> Converter<'a> {
             match transform.kind {
                 TransformKind::Translation => {
                     let mut out = OutNode::new("Transform");
-                    out.fields.push(("translation".to_owned(), transform.value.clone()));
+                    out.fields
+                        .push(("translation".to_owned(), transform.value.clone()));
+                    out.fields.push((
+                        "children".to_owned(),
+                        Value::List(vec![Value::Node(Box::new(wrapped))]),
+                    ));
+                    wrapped = out;
+                }
+                TransformKind::Rotation => {
+                    let mut out = OutNode::new("Transform");
+                    out.fields
+                        .push(("rotation".to_owned(), transform.value.clone()));
+                    out.fields.push((
+                        "children".to_owned(),
+                        Value::List(vec![Value::Node(Box::new(wrapped))]),
+                    ));
+                    wrapped = out;
+                }
+                TransformKind::Scale => {
+                    let mut out = OutNode::new("Transform");
+                    out.fields
+                        .push(("scale".to_owned(), transform.value.clone()));
+                    out.fields.push((
+                        "children".to_owned(),
+                        Value::List(vec![Value::Node(Box::new(wrapped))]),
+                    ));
+                    wrapped = out;
+                }
+                TransformKind::Matrix => {
+                    let mut out = OutNode::new("Transform");
+                    for (field_name, value) in self.matrix_to_transform_fields(&transform.value) {
+                        out.fields.push((field_name, value));
+                    }
                     out.fields.push((
                         "children".to_owned(),
                         Value::List(vec![Value::Node(Box::new(wrapped))]),
@@ -852,6 +1216,23 @@ impl<'a> Converter<'a> {
                         .definitions
                         .insert(def_name.clone(), DefinitionValue::Normal(value.clone()));
                 }
+                "TextureCoordinate" => {
+                    state.definitions.insert(
+                        def_name.clone(),
+                        DefinitionValue::TextureCoordinate(value.clone()),
+                    );
+                }
+                "ImageTexture" | "PixelTexture" => {
+                    state
+                        .definitions
+                        .insert(def_name.clone(), DefinitionValue::Texture(value.clone()));
+                }
+                "TextureTransform" => {
+                    state.definitions.insert(
+                        def_name.clone(),
+                        DefinitionValue::TextureTransform(value.clone()),
+                    );
+                }
                 "FontStyle" => {
                     state
                         .definitions
@@ -871,7 +1252,9 @@ impl<'a> Converter<'a> {
     /// Store emitted node definitions so later `USE` statements can reference them.
     fn store_emitted_definition(&self, node: OutNode, state: &mut ConversionState) -> OutNode {
         if let Some(def_name) = &node.def_name {
-            state.definitions.insert(def_name.clone(), DefinitionValue::Node);
+            state
+                .definitions
+                .insert(def_name.clone(), DefinitionValue::Node);
         }
         node
     }
@@ -899,11 +1282,23 @@ impl<'a> Converter<'a> {
                 state.normal = Some(NodeRef::Defined(use_ref.name.clone(), node));
                 Ok(Vec::new())
             }
+            DefinitionValue::TextureCoordinate(node) => {
+                state.tex_coord = Some(NodeRef::Defined(use_ref.name.clone(), node));
+                Ok(Vec::new())
+            }
+            DefinitionValue::Texture(node) => {
+                state.texture = Some(NodeRef::Defined(use_ref.name.clone(), node));
+                Ok(Vec::new())
+            }
+            DefinitionValue::TextureTransform(node) => {
+                state.texture_transform = Some(NodeRef::Defined(use_ref.name.clone(), node));
+                Ok(Vec::new())
+            }
             DefinitionValue::FontStyle(node) => {
                 state.font_style = Some(NodeRef::Defined(use_ref.name.clone(), node));
                 Ok(Vec::new())
             }
-            DefinitionValue::Node => {
+            DefinitionValue::Node => Ok(vec![{
                 let mut out = OutNode::new("Transform");
                 out.fields.push((
                     "children".to_owned(),
@@ -911,8 +1306,8 @@ impl<'a> Converter<'a> {
                         name: use_ref.name.clone(),
                     })]),
                 ));
-                Ok(vec![out])
-            }
+                out
+            }]),
         }
     }
 
@@ -921,6 +1316,9 @@ impl<'a> Converter<'a> {
         match node_ref {
             NodeRef::Inline(node) => Ok(node.clone()),
             NodeRef::Defined(name, node) => {
+                if self.emitted_defs.contains_key(name) {
+                    return Ok(node.clone());
+                }
                 self.emitted_defs.insert(name.clone(), ());
                 let mut node = node.clone();
                 node.def_name = Some(name.clone());
@@ -971,7 +1369,11 @@ impl<'a> Converter<'a> {
     }
 
     /// Normalize a parsed color field into a list of RGB vectors.
-    fn ensure_color_list(&self, value: Option<&Value>, default: &[f64]) -> Result<Vec<Vec<f64>>, VrmlError> {
+    fn ensure_color_list(
+        &self,
+        value: Option<&Value>,
+        default: &[f64],
+    ) -> Result<Vec<Vec<f64>>, VrmlError> {
         match value {
             None => Ok(vec![default.to_vec()]),
             Some(Value::Vec(values)) => Ok(vec![values.clone()]),
@@ -987,7 +1389,11 @@ impl<'a> Converter<'a> {
     }
 
     /// Normalize a parsed scalar field into a list of floats.
-    fn ensure_float_list(&self, value: Option<&Value>, default: f64) -> Result<Vec<f64>, VrmlError> {
+    fn ensure_float_list(
+        &self,
+        value: Option<&Value>,
+        default: f64,
+    ) -> Result<Vec<f64>, VrmlError> {
         match value {
             None => Ok(vec![default]),
             Some(Value::Float(value)) => Ok(vec![*value]),
@@ -1024,6 +1430,50 @@ impl<'a> Converter<'a> {
         }
     }
 
+    /// Convert a parsed texture node into VRML 2.0 texture output.
+    fn convert_texture(&self, node: &AstNode) -> OutNode {
+        if let Some(url) = self.value_to_string_list(node.fields.get("filename")) {
+            let mut out = OutNode::new("ImageTexture");
+            out.def_name = node.def_name.clone();
+            out.fields.push(("url".to_owned(), url));
+            if matches!(
+                self.enum_value(node, "wrapS").as_deref().map(str::to_ascii_uppercase),
+                Some(value) if value == "CLAMP"
+            ) {
+                out.fields.push(("repeatS".to_owned(), Value::Bool(false)));
+            }
+            if matches!(
+                self.enum_value(node, "wrapT").as_deref().map(str::to_ascii_uppercase),
+                Some(value) if value == "CLAMP"
+            ) {
+                out.fields.push(("repeatT".to_owned(), Value::Bool(false)));
+            }
+            return out;
+        }
+
+        let mut out = OutNode::new("ImageTexture");
+        out.def_name = node.def_name.clone();
+        out.fields.push(("url".to_owned(), Value::List(Vec::new())));
+        out
+    }
+
+    /// Convert a VRML 1.0 texture transform helper node.
+    fn convert_texture_transform(&self, node: &AstNode) -> OutNode {
+        let mut out = OutNode::new("TextureTransform");
+        out.def_name = node.def_name.clone();
+        for (source, target) in [
+            ("translation", "translation"),
+            ("rotation", "rotation"),
+            ("scaleFactor", "scale"),
+            ("center", "center"),
+        ] {
+            if let Some(value) = node.fields.get(source) {
+                out.fields.push((target.to_owned(), value.clone()));
+            }
+        }
+        out
+    }
+
     /// Read a float field from a parsed node when present.
     fn float_field(&self, node: &AstNode, field_name: &str) -> Option<f64> {
         self.float_value(node.fields.get(field_name))
@@ -1031,9 +1481,17 @@ impl<'a> Converter<'a> {
 
     /// Read an integer field from a parsed node when present.
     fn int_field(&self, node: &AstNode, field_name: &str) -> Option<i32> {
-        match node.fields.get(field_name) {
+        self.int_field_from_value(node.fields.get(field_name))
+    }
+
+    /// Read an integer-like value from an arbitrary parsed value.
+    fn int_field_from_value(&self, value: Option<&Value>) -> Option<i32> {
+        match value {
             Some(Value::Int(value)) => Some(*value),
             Some(Value::Float(value)) => Some(*value as i32),
+            Some(Value::List(values)) if values.len() == 1 => {
+                self.int_field_from_value(values.first())
+            }
             _ => None,
         }
     }
@@ -1043,6 +1501,16 @@ impl<'a> Converter<'a> {
         match node.fields.get(field_name) {
             Some(Value::Identifier(value)) => Some(value.clone()),
             Some(Value::String(value)) => Some(value.clone()),
+            _ => None,
+        }
+    }
+
+    /// Read a string-like value from an arbitrary parsed value.
+    fn string_value(&self, value: Option<&Value>) -> Option<String> {
+        match value {
+            Some(Value::String(value)) => Some(value.clone()),
+            Some(Value::Identifier(value)) => Some(value.clone()),
+            Some(Value::List(values)) if values.len() == 1 => self.string_value(values.first()),
             _ => None,
         }
     }
@@ -1069,6 +1537,76 @@ impl<'a> Converter<'a> {
     /// Read a float hint from the active shape hints map.
     fn float_hint(&self, hints: &HashMap<String, Value>, field_name: &str) -> Option<f64> {
         self.float_value(hints.get(field_name))
+    }
+
+    /// Normalize a symbolic parts field into uppercase component names.
+    fn bitmask_parts(&self, value: Option<&Value>, default_parts: &[&str]) -> Vec<String> {
+        let raw_values = match value {
+            Some(Value::Identifier(value)) => vec![value.clone()],
+            Some(Value::String(value)) => vec![value.clone()],
+            Some(Value::List(values)) => values
+                .iter()
+                .filter_map(|value| match value {
+                    Value::Identifier(value) | Value::String(value) => Some(value.clone()),
+                    _ => None,
+                })
+                .collect(),
+            _ => default_parts
+                .iter()
+                .map(|part| (*part).to_owned())
+                .collect(),
+        };
+
+        let mut parts = Vec::new();
+        for raw in raw_values {
+            for part in raw
+                .trim_matches(|character| matches!(character, '(' | ')'))
+                .split('|')
+            {
+                let trimmed = part.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                parts.push(trimmed.to_ascii_uppercase());
+            }
+        }
+        if parts.is_empty() {
+            return default_parts
+                .iter()
+                .map(|part| (*part).to_owned())
+                .collect();
+        }
+        parts
+    }
+
+    /// Approximate a matrix transform with VRML 2.0 translation and scale fields.
+    fn matrix_to_transform_fields(&self, value: &Value) -> Vec<(String, Value)> {
+        let Value::List(values) = value else {
+            return Vec::new();
+        };
+
+        let matrix = values
+            .iter()
+            .filter_map(|value| self.float_value(Some(value)))
+            .collect::<Vec<_>>();
+        if matrix.len() != 16 {
+            return Vec::new();
+        }
+
+        let scale = vec![
+            (matrix[0] * matrix[0] + matrix[1] * matrix[1] + matrix[2] * matrix[2]).sqrt(),
+            (matrix[4] * matrix[4] + matrix[5] * matrix[5] + matrix[6] * matrix[6]).sqrt(),
+            (matrix[8] * matrix[8] + matrix[9] * matrix[9] + matrix[10] * matrix[10]).sqrt(),
+        ];
+
+        let mut fields = vec![(
+            "translation".to_owned(),
+            Value::Vec(vec![matrix[12], matrix[13], matrix[14]]),
+        )];
+        if scale != vec![1.0, 1.0, 1.0] {
+            fields.push(("scale".to_owned(), Value::Vec(scale)));
+        }
+        fields
     }
 }
 

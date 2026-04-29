@@ -63,7 +63,11 @@ impl<R: Read> CharReader<R> {
         if position >= self.buffer.len() {
             return Ok(None);
         }
-        Ok(self.buffer.as_bytes().get(position).map(|byte| *byte as char))
+        Ok(self
+            .buffer
+            .as_bytes()
+            .get(position)
+            .map(|byte| *byte as char))
     }
 
     /// Consume and return the next character.
@@ -385,7 +389,7 @@ impl<I: Iterator<Item = Result<Token, VrmlError>>> Parser<I> {
                 Statement::Use(_) => {
                     return Err(VrmlError::from(format!(
                         "DEF {def_name} must target a node"
-                    )))
+                    )));
                 }
             };
             node.def_name = Some(def_name);
@@ -404,7 +408,9 @@ impl<I: Iterator<Item = Result<Token, VrmlError>>> Parser<I> {
 
     /// Parse one node with fields and child statements.
     fn parse_node(&mut self) -> Result<AstNode, VrmlError> {
-        let node_type = self.consume(TokenKind::Identifier, "Expected node type")?.value;
+        let node_type = self
+            .consume(TokenKind::Identifier, "Expected node type")?
+            .value;
         self.consume_symbol("{", &format!("Expected '{{' after node type {node_type}"))?;
 
         let mut fields = BTreeMap::new();
@@ -446,6 +452,10 @@ impl<I: Iterator<Item = Result<Token, VrmlError>>> Parser<I> {
             FieldKind::Bool => self.parse_bool(),
             FieldKind::Int => Ok(Value::Int(self.parse_int("Expected integer")?)),
             FieldKind::Float => Ok(Value::Float(self.parse_float("Expected float")?)),
+            FieldKind::String => {
+                let token = self.consume(TokenKind::String, "Expected string value")?;
+                Ok(Value::String(token.value))
+            }
             FieldKind::Vec2 => Ok(Value::Vec(
                 self.parse_fixed_vector(2, "Expected numeric vector value")?,
             )),
@@ -455,10 +465,13 @@ impl<I: Iterator<Item = Result<Token, VrmlError>>> Parser<I> {
             FieldKind::Rotation => Ok(Value::Vec(
                 self.parse_fixed_vector(4, "Expected numeric rotation value")?,
             )),
+            FieldKind::Matrix => Ok(Value::List(self.parse_number_list(16)?)),
             FieldKind::MfInt => self.parse_multi_numeric_values(1, false),
             FieldKind::MfFloat => self.parse_multi_numeric_values(1, true),
+            FieldKind::MfVec2 => self.parse_multi_numeric_values(2, true),
             FieldKind::MfVec3 => self.parse_multi_numeric_values(3, true),
             FieldKind::MfString => self.parse_multi_strings(),
+            FieldKind::Bitmask => self.parse_bitmask(node_type),
             FieldKind::Enum => {
                 let token = self.consume(
                     TokenKind::Identifier,
@@ -471,11 +484,7 @@ impl<I: Iterator<Item = Result<Token, VrmlError>>> Parser<I> {
     }
 
     /// Parse a best-effort value form for less structured fields.
-    fn parse_auto_value(
-        &mut self,
-        _node_type: &str,
-        field_name: &str,
-    ) -> Result<Value, VrmlError> {
+    fn parse_auto_value(&mut self, _node_type: &str, field_name: &str) -> Result<Value, VrmlError> {
         if self.match_identifier("DEF")? {
             let def_name = self
                 .consume(TokenKind::Identifier, "Expected name after DEF")?
@@ -485,9 +494,9 @@ impl<I: Iterator<Item = Result<Token, VrmlError>>> Parser<I> {
                     node.def_name = Some(def_name);
                     Ok(Value::Node(Box::new(convert_ast_node_to_out_node(node)?)))
                 }
-                Statement::Use(_) => {
-                    Err(VrmlError::from(format!("DEF {def_name} must target a node")))
-                }
+                Statement::Use(_) => Err(VrmlError::from(format!(
+                    "DEF {def_name} must target a node"
+                ))),
             };
         }
 
@@ -508,13 +517,7 @@ impl<I: Iterator<Item = Result<Token, VrmlError>>> Parser<I> {
                 self.advance()?;
                 Ok(Value::String(token.value))
             }
-            TokenKind::Number => {
-                self.advance()?;
-                let number = token.value.parse::<f64>().map_err(|error| {
-                    VrmlError::from(format!("Invalid numeric value {}: {error}", token.value))
-                })?;
-                Ok(Value::Float(number))
-            }
+            TokenKind::Number => self.parse_auto_numeric_sequence(),
             TokenKind::Identifier => {
                 if self.peek_next_symbol("{")? {
                     let nested = self.parse_statement()?;
@@ -577,13 +580,32 @@ impl<I: Iterator<Item = Result<Token, VrmlError>>> Parser<I> {
         Ok(Value::List(values))
     }
 
+    /// Parse one unbracketed numeric value or numeric vector for an unknown field.
+    fn parse_auto_numeric_sequence(&mut self) -> Result<Value, VrmlError> {
+        let mut values = Vec::new();
+        while self.peek()?.kind == TokenKind::Number {
+            values.push(self.parse_float("Expected numeric value")?);
+        }
+
+        match values.len() {
+            0 => Err(VrmlError::from("Expected numeric value")),
+            1 => Ok(Value::Float(values[0])),
+            2..=4 => Ok(Value::Vec(values)),
+            _ => Ok(Value::List(
+                values.into_iter().map(Value::Float).collect::<Vec<_>>(),
+            )),
+        }
+    }
+
     /// Parse a VRML boolean literal.
     fn parse_bool(&mut self) -> Result<Value, VrmlError> {
         let token = self.consume(TokenKind::Identifier, "Expected TRUE or FALSE")?;
         match token.value.to_ascii_uppercase().as_str() {
             "TRUE" => Ok(Value::Bool(true)),
             "FALSE" => Ok(Value::Bool(false)),
-            other => Err(VrmlError::from(format!("Illegal value for QvSFBool: {other}"))),
+            other => Err(VrmlError::from(format!(
+                "Illegal value for QvSFBool: {other}"
+            ))),
         }
     }
 
@@ -612,6 +634,23 @@ impl<I: Iterator<Item = Result<Token, VrmlError>>> Parser<I> {
         Ok(values)
     }
 
+    /// Parse a fixed-size list of floats, optionally enclosed in brackets.
+    fn parse_number_list(&mut self, count: usize) -> Result<Vec<Value>, VrmlError> {
+        let mut values = Vec::with_capacity(count);
+        if self.check_symbol("[")? {
+            self.consume_symbol("[", "Expected '['")?;
+        }
+        for _ in 0..count {
+            values.push(Value::Float(
+                self.parse_float("Expected numeric matrix value")?,
+            ));
+        }
+        if self.check_symbol("]")? {
+            self.consume_symbol("]", "Expected ']'")?;
+        }
+        Ok(values)
+    }
+
     /// Parse one scalar or bracketed numeric multi-value field.
     fn parse_multi_numeric_values(
         &mut self,
@@ -631,12 +670,47 @@ impl<I: Iterator<Item = Result<Token, VrmlError>>> Parser<I> {
         Ok(Value::List(values))
     }
 
+    /// Parse symbolic bitmask values such as `(SIDES|BOTTOM)` until the next field boundary.
+    fn parse_bitmask(&mut self, node_type: &str) -> Result<Value, VrmlError> {
+        let mut values = Vec::new();
+        while !self.at_end()? {
+            if self.check_symbol("}")? || self.check_symbol("]")? {
+                break;
+            }
+            let token = self.peek()?;
+            if token.kind != TokenKind::Identifier {
+                break;
+            }
+            if !values.is_empty() && is_known_field_name(node_type, &token.value) {
+                break;
+            }
+
+            self.advance()?;
+            for part in token
+                .value
+                .trim_matches(|character| matches!(character, '(' | ')'))
+                .split('|')
+            {
+                let trimmed = part.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                values.push(Value::Identifier(trimmed.to_owned()));
+            }
+        }
+
+        if values.is_empty() {
+            let token = self.peek()?;
+            return Err(VrmlError::from(format!(
+                "Expected symbolic value at line {}, column {}",
+                token.line, token.column
+            )));
+        }
+        Ok(Value::List(values))
+    }
+
     /// Parse one numeric item from a multi-value field.
-    fn parse_multi_numeric_item(
-        &mut self,
-        arity: usize,
-        floats: bool,
-    ) -> Result<Value, VrmlError> {
+    fn parse_multi_numeric_item(&mut self, arity: usize, floats: bool) -> Result<Value, VrmlError> {
         if arity == 1 {
             return if floats {
                 Ok(Value::Float(self.parse_float("Expected numeric value")?))
@@ -762,33 +836,85 @@ fn field_kind(node_type: &str, field_name: &str) -> FieldKind {
     match (node_type, field_name) {
         ("PerspectiveCamera", "position") => FieldKind::Vec3,
         ("PerspectiveCamera", "orientation") => FieldKind::Rotation,
+        ("PerspectiveCamera", "focalDistance") => FieldKind::Float,
+        ("PerspectiveCamera", "nearDistance") => FieldKind::Float,
+        ("PerspectiveCamera", "farDistance") => FieldKind::Float,
         ("PerspectiveCamera", "heightAngle") => FieldKind::Float,
+        ("OrthographicCamera", "position") => FieldKind::Vec3,
+        ("OrthographicCamera", "orientation") => FieldKind::Rotation,
+        ("OrthographicCamera", "focalDistance") => FieldKind::Float,
+        ("OrthographicCamera", "nearDistance") => FieldKind::Float,
+        ("OrthographicCamera", "farDistance") => FieldKind::Float,
+        ("OrthographicCamera", "height") => FieldKind::Float,
         ("DirectionalLight", "on") => FieldKind::Bool,
         ("DirectionalLight", "direction") => FieldKind::Vec3,
         ("DirectionalLight", "color") => FieldKind::Vec3,
         ("DirectionalLight", "intensity") => FieldKind::Float,
+        ("PointLight", "on") => FieldKind::Bool,
+        ("PointLight", "location") => FieldKind::Vec3,
+        ("PointLight", "color") => FieldKind::Vec3,
+        ("PointLight", "intensity") => FieldKind::Float,
+        ("SpotLight", "on") => FieldKind::Bool,
+        ("SpotLight", "location") => FieldKind::Vec3,
+        ("SpotLight", "direction") => FieldKind::Vec3,
+        ("SpotLight", "color") => FieldKind::Vec3,
+        ("SpotLight", "intensity") => FieldKind::Float,
+        ("SpotLight", "dropOffRate") => FieldKind::Float,
+        ("SpotLight", "cutOffAngle") => FieldKind::Float,
         ("Material", "ambientColor") => FieldKind::MfVec3,
         ("Material", "diffuseColor") => FieldKind::MfVec3,
         ("Material", "specularColor") => FieldKind::MfVec3,
         ("Material", "emissiveColor") => FieldKind::MfVec3,
         ("Material", "shininess") => FieldKind::MfFloat,
         ("Material", "transparency") => FieldKind::MfFloat,
+        ("ExtendedMaterial", "diffuseColor") => FieldKind::MfVec3,
+        ("ExtendedMaterial", "transparency") => FieldKind::MfFloat,
         ("MaterialBinding", "value") => FieldKind::Enum,
         ("NormalBinding", "value") => FieldKind::Enum,
         ("Coordinate3", "point") => FieldKind::MfVec3,
         ("Normal", "vector") => FieldKind::MfVec3,
+        ("TextureCoordinate2", "point") => FieldKind::MfVec2,
+        ("Texture2", "filename") => FieldKind::MfString,
+        ("Texture2", "wrapS") => FieldKind::Enum,
+        ("Texture2", "wrapT") => FieldKind::Enum,
+        ("Texture2", "image") => FieldKind::MfInt,
+        ("Texture2Transform", "translation") => FieldKind::Vec2,
+        ("Texture2Transform", "rotation") => FieldKind::Float,
+        ("Texture2Transform", "scaleFactor") => FieldKind::Vec2,
+        ("Texture2Transform", "center") => FieldKind::Vec2,
+        ("Texture2Transformation", "translation") => FieldKind::Vec2,
+        ("Texture2Transformation", "rotation") => FieldKind::Float,
+        ("Texture2Transformation", "scaleFactor") => FieldKind::Vec2,
+        ("Texture2Transformation", "center") => FieldKind::Vec2,
         ("ShapeHints", "vertexOrdering") => FieldKind::Enum,
         ("ShapeHints", "shapeType") => FieldKind::Enum,
         ("ShapeHints", "faceType") => FieldKind::Enum,
         ("ShapeHints", "creaseAngle") => FieldKind::Float,
+        ("Background", "skyColor") => FieldKind::MfVec3,
         ("IndexedFaceSet", "coordIndex") => FieldKind::MfInt,
         ("IndexedFaceSet", "materialIndex") => FieldKind::MfInt,
         ("IndexedFaceSet", "normalIndex") => FieldKind::MfInt,
         ("IndexedFaceSet", "textureCoordIndex") => FieldKind::MfInt,
+        ("LOD", "range") => FieldKind::MfFloat,
         ("Translation", "translation") => FieldKind::Vec3,
+        ("Rotation", "rotation") => FieldKind::Rotation,
+        ("Scale", "scaleFactor") => FieldKind::Vec3,
+        ("Transform", "translation") => FieldKind::Vec3,
+        ("Transform", "rotation") => FieldKind::Rotation,
+        ("Transform", "scaleFactor") => FieldKind::Vec3,
+        ("Transform", "scaleOrientation") => FieldKind::Rotation,
+        ("Transform", "center") => FieldKind::Vec3,
+        ("MatrixTransform", "matrix") => FieldKind::Matrix,
         ("Cube", "width") => FieldKind::Float,
         ("Cube", "height") => FieldKind::Float,
         ("Cube", "depth") => FieldKind::Float,
+        ("Cone", "parts") => FieldKind::Bitmask,
+        ("Cone", "bottomRadius") => FieldKind::Float,
+        ("Cone", "height") => FieldKind::Float,
+        ("Cylinder", "parts") => FieldKind::Bitmask,
+        ("Cylinder", "radius") => FieldKind::Float,
+        ("Cylinder", "height") => FieldKind::Float,
+        ("Sphere", "radius") => FieldKind::Float,
         ("FontStyle", "size") => FieldKind::Float,
         ("FontStyle", "family") => FieldKind::Enum,
         ("FontStyle", "style") => FieldKind::Enum,
@@ -797,10 +923,24 @@ fn field_kind(node_type: &str, field_name: &str) -> FieldKind {
         ("AsciiText", "justification") => FieldKind::Enum,
         ("AsciiText", "width") => FieldKind::Float,
         ("IndexedLineSet", "coordIndex") => FieldKind::MfInt,
+        ("IndexedLineSet", "materialIndex") => FieldKind::MfInt,
         ("PointSet", "startIndex") => FieldKind::Int,
         ("PointSet", "numPoints") => FieldKind::Int,
+        ("Switch", "whichChild") => FieldKind::Int,
+        ("WWWAnchor", "name") => FieldKind::MfString,
+        ("WWWAnchor", "description") => FieldKind::String,
+        ("WWWAnchor", "map") => FieldKind::Bool,
+        ("WWWInline", "name") => FieldKind::MfString,
+        ("WWWInline", "bboxCenter") => FieldKind::Vec3,
+        ("WWWInline", "bboxSize") => FieldKind::Vec3,
+        ("WWWInline", "separate") => FieldKind::Bool,
         _ => FieldKind::Auto,
     }
+}
+
+/// Return whether a token matches a known field name for the given node type.
+fn is_known_field_name(node_type: &str, field_name: &str) -> bool {
+    !matches!(field_kind(node_type, field_name), FieldKind::Auto)
 }
 
 /// Convert a parsed AST node into a structurally equivalent output node placeholder.
