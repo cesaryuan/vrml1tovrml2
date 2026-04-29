@@ -1,21 +1,94 @@
 # vrml1tovrml2
 
-Linux-native reimplementation of the old Windows `vrml1tovrml2.exe` workflow.
+[简体中文](./README.zh-CN.md)
 
-这个仓库原先只有老的 Windows 二进制和你导出的逆向资料。现在补上了一个可直接在 Linux 上运行的命令行实现：
+`vrml1tovrml2` is a VRML 1.0 to VRML 2.0 converter designed for Linux-based workflows as a replacement for the legacy Windows `vrml1tovrml2.exe` pipeline. This repository provides a Rust-native command-line implementation while keeping the Python compatibility entrypoint and modular implementation for regression work and future extensions.
 
-- 可执行入口：`./vrml1tovrml2`
-- Rust CLI 入口：`./src/main.rs`
-- Python 兼容 API 入口：`./vrml1tovrml2.py`
-- 模块化源码目录：`./vrml1tovrml2_pkg/`
-- 示例输入：`examples/sample_v1.wrl`
-- 示例输出：`examples/sample_v2.wrl`
+## Overview
 
-当前命令行入口已经改成 Rust 实现；它负责参数透传、工作目录和退出码处理，并转调现有的 Python 转换核心。
+- Built for migrating and batch-converting existing `.wrl` assets.
+- Focused on reproducing the practical workflow of the historical tool rather than byte-for-byte behavior of the original binary.
+- Uses a Rust CLI as the default entrypoint, making it suitable for Linux, WSL, and CI environments.
+- Keeps the Python implementation and sample data in the repository for debugging, comparison, and compatibility work.
 
-## WRL 目录建议
+## Project Status
 
-为了后续持续回归，建议把用于对比的 `.wrl` 样例统一按 case 组织在 `wrl/cases/` 下：
+- The current implementation successfully converts the sample inputs and checked-in regression cases in this repository.
+- Common VRML 1.0 / Open Inventor style nodes are already covered.
+- Compatibility work is still ongoing, especially for rare historical extensions and unusual field combinations.
+
+## Quick Start
+
+### Requirements
+
+- Rust toolchain
+- Bash
+- Python 3.13+ (only needed for the Python compatibility API or helper scripts)
+
+If you only use the default Rust CLI, you can run the converter without installing Python dependencies.
+
+If you need the Python compatibility layer or helper scripts, install them with:
+
+```bash
+pip install -e .
+```
+
+### Run the Converter
+
+The repository root includes a convenience launcher that invokes the Rust CLI:
+
+```bash
+./vrml1tovrml2 input_v1.wrl output_v2.wrl
+```
+
+If only the input file is provided, the converted result is written to stdout:
+
+```bash
+./vrml1tovrml2 input_v1.wrl
+```
+
+Enable verbose logging:
+
+```bash
+./vrml1tovrml2 --verbose input_v1.wrl output_v2.wrl
+```
+
+Show progress for reading, conversion, and writing:
+
+```bash
+./vrml1tovrml2 --progress input_v1.wrl output_v2.wrl
+```
+
+### Build the Rust Binary
+
+If you want to build first and run afterward:
+
+```bash
+cargo build --release
+```
+
+## Supported and Verified Nodes
+
+- Grouping and hierarchy: `Separator`, `TransformSeparator`, `Group`, `Switch`, `LOD`
+- Transforms: `Translation`, `Rotation`, `Scale`, `Transform`, `MatrixTransform`
+- Geometry and indexing: `Coordinate3`, `IndexedFaceSet`, `IndexedLineSet`, `PointSet`
+- Primitive shapes: `Cube`, `Cone`, `Cylinder`, `Sphere`
+- Appearance-related nodes: `Material`, `MaterialBinding`, `Normal`, `NormalBinding`, `ShapeHints`
+- Texture-related nodes: `Texture2`, `TextureCoordinate2`, `Texture2Transform`, `Texture2Transformation`
+- Text: `AsciiText`, `FontStyle`
+- Lights and cameras: `DirectionalLight`, `PointLight`, `SpotLight`, `PerspectiveCamera`, `OrthographicCamera`
+- Other nodes: `WWWAnchor`, `WWWInline`
+- Shared definitions: `DEF` / `USE`
+
+## Examples and Regression Data
+
+Sample files are available in [examples](./examples):
+
+- Input sample: [examples/sample_v1.wrl](./examples/sample_v1.wrl)
+- Output sample: [examples/sample_v2.wrl](./examples/sample_v2.wrl)
+- `DEF` / `USE` sample: [examples/sample_defs_v1.wrl](./examples/sample_defs_v1.wrl)
+
+Regression data is organized by case under [wrl/cases](./wrl/cases):
 
 ```text
 wrl/
@@ -26,92 +99,37 @@ wrl/
       current.v2.from_python.wrl
 ```
 
-这样每个测试样例的输入、Windows 真值输出、当前实现输出都放在同一个目录里，后续新增样例、做 diff、写自动化脚本都会更顺手。
+Current checked-in cases:
 
-当前已整理的 case：
+- [sample_minimal](./wrl/cases/sample_minimal)
+- [ansys_test_from_ansys_1](./wrl/cases/ansys_test_from_ansys_1)
 
-- [sample_minimal](/home/cesar/vrml1tovrml2/wrl/cases/sample_minimal)
-- [ansys_test_from_ansys_1](/home/cesar/vrml1tovrml2/wrl/cases/ansys_test_from_ansys_1)
-
-其中 [wrl/cases/ansys_test_from_ansys_1/baseline.v2.from_exe.wrl](/home/cesar/vrml1tovrml2/wrl/cases/ansys_test_from_ansys_1/baseline.v2.from_exe.wrl)
-已经作为项目内真值保存，后续迭代默认直接使用这个文件，不需要再调用一次原始 `.exe`。
-
-## 用法
+To regenerate the current regression outputs:
 
 ```bash
-./vrml1tovrml2 input_v1.wrl output_v2.wrl
-```
-
-或者输出到标准输出：
-
-```bash
-./vrml1tovrml2 input_v1.wrl
-```
-
-调试日志：
-
-```bash
-./vrml1tovrml2 input_v1.wrl output_v2.wrl --verbose
-```
-
-如果环境里安装了 `tqdm`，可以打开输入读取进度条：
-
-```bash
-./vrml1tovrml2 --progress input_v1.wrl output_v2.wrl
-```
-
-如果没有安装 `tqdm`，程序会自动降级，不会报错。
-
-## 当前已实现并验证的节点
-
-- 分组与层级：`Separator`, `TransformSeparator`, `Group`, `Switch`, `LOD`
-- 变换：`Translation`, `Rotation`, `Scale`, `Transform`, `MatrixTransform`
-- 几何与索引：`Coordinate3`, `IndexedFaceSet`, `IndexedLineSet`, `PointSet`
-- 基础体：`Cube`, `Cone`, `Cylinder`, `Sphere`
-- 外观相关：`Material`, `MaterialBinding`, `Normal`, `NormalBinding`, `ShapeHints`
-- 纹理相关：`Texture2`, `TextureCoordinate2`, `Texture2Transform`, `Texture2Transformation`
-- 文本：`AsciiText`, `FontStyle`
-- 其他：`DirectionalLight`, `PointLight`, `SpotLight`, `PerspectiveCamera`, `OrthographicCamera`, `WWWAnchor`, `WWWInline`
-- 共享定义：`DEF` / `USE`
-
-## 已验证示例
-
-```bash
-./vrml1tovrml2 examples/sample_v1.wrl examples/sample_v2.wrl
-./vrml1tovrml2 examples/sample_defs_v1.wrl examples/sample_defs_v2.wrl
 ./scripts/regenerate_testset.sh
 ```
 
-两个示例都能成功生成 `#VRML V2.0 utf8` 输出。
+## Repository Layout
 
-## 当前限制
+- [vrml1tovrml2](./vrml1tovrml2): default command-line launcher
+- [src](./src): Rust CLI, parser, converter, and writer implementation
+- [vrml1tovrml2.py](./vrml1tovrml2.py): Python compatibility entrypoint
+- [vrml1tovrml2_pkg](./vrml1tovrml2_pkg): modular Python implementation
+- [examples](./examples): sample input and output files
+- [wrl/cases](./wrl/cases): regression cases and baselines
+- [scripts](./scripts): helper scripts
 
-- 这是一个“按逆向资料和 VRML 语义重建”的 Linux 实现，不是逐函数逐字节复刻原 DLL。
-- 目前优先覆盖主流 VRML 1.0/Open Inventor 风格节点，对一些非常少见的 SGI/Cosmo 专有扩展节点还没有完整补齐。
-- `MatrixTransform` 目前做的是常见仿射场景下的近似转换，重点保留平移和轴向缩放。
-- 复杂绑定、少见字段组合、历史兼容细节，仍建议拿你的真实 `.wrl` 样本继续回归补全。
-- 当前已经完成两阶段内存优化中的前两步：输入读取、tokenizer、输出写入都支持流式；`Material`、`Coordinate3`、`Normal`、`IndexedFaceSet`、`IndexedLineSet` 的大数组字段会优先落到临时 spool 文件而不是长期保存在 Python 大列表里。
-- 但转换器整体还没有做到完全“边解析边输出”，节点级 AST 和部分中间状态仍然会驻留内存，所以这还不是最终版的大文件方案。
+## Current Limitations
 
-## 代码说明
+- This is a reimplementation based on reverse-engineered behavior and VRML semantics, not a function-by-function clone of the original DLL.
+- The current priority is mainstream node coverage; rare SGI / Cosmo style extension nodes are not fully implemented yet.
+- `MatrixTransform` currently targets common affine scenarios, with emphasis on preserving translation and axis-aligned scaling.
+- Complex bindings, rare field combinations, and historical compatibility details still need validation against real production samples.
+- Some memory optimizations are already in place, but the converter is not yet a fully streaming parse-to-output implementation for extremely large files.
 
-- Rust CLI 入口在 [src/main.rs](/home/cesar/vrml1tovrml2/src/main.rs)。
-- Python 兼容 API 入口在 [vrml1tovrml2.py](/home/cesar/vrml1tovrml2/vrml1tovrml2.py)。
-- 模块化实现位于 [vrml1tovrml2_pkg](/home/cesar/vrml1tovrml2/vrml1tovrml2_pkg)：
-  - [common.py](/home/cesar/vrml1tovrml2/vrml1tovrml2_pkg/common.py)
-  - [specs.py](/home/cesar/vrml1tovrml2/vrml1tovrml2_pkg/specs.py)
-  - [parser.py](/home/cesar/vrml1tovrml2/vrml1tovrml2_pkg/parser.py)
-  - [converter.py](/home/cesar/vrml1tovrml2/vrml1tovrml2_pkg/converter.py)
-  - [writer.py](/home/cesar/vrml1tovrml2/vrml1tovrml2_pkg/writer.py)
-  - [cli.py](/home/cesar/vrml1tovrml2/vrml1tovrml2_pkg/cli.py)
-  - [progress.py](/home/cesar/vrml1tovrml2/vrml1tovrml2_pkg/progress.py)
-- 回归脚本在 [scripts/regenerate_testset.sh](/home/cesar/vrml1tovrml2/scripts/regenerate_testset.sh)。
+## Before Publishing
 
-## 并行化评估
-
-- 对“单个超大 `.wrl` 文件内部”直接并行处理，目前不建议强上。
-  原因是 VRML1 场景遍历有明显的顺序状态依赖，例如 `Material`、`Coordinate3`、`Normal`、`Binding`、变换栈和 `DEF/USE`。
-- 现阶段更安全的并行方向是“多文件级并行”：
-  同时转换多个独立 case 或多个独立 `.wrl` 文件。
-- 如果后续继续深挖单文件并行，比较现实的方向是：
-  先把顶层 `Separator` 下的独立 geometry/shapes 切成批次，再做受控并行，但这需要进一步重构转换状态模型。
+- Add a `LICENSE` file before making the repository fully public.
+- Add `README` files for more languages if you want multi-language project presentation.
+- Keep collecting real `.wrl` samples under [wrl/cases](./wrl/cases) to improve regression coverage over time.
