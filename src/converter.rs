@@ -88,8 +88,8 @@ enum DefinitionValue {
     TextureTransform(OutNode),
     /// A font style definition that affects future text.
     FontStyle(OutNode),
-    /// A directly emitted output node name that can later be referenced by `USE`.
-    Node,
+    /// A directly emitted output node that can later be referenced by `USE`.
+    Node(OutNode),
 }
 
 /// Track inherited VRML 1.0 state while traversing statements.
@@ -345,41 +345,50 @@ impl<'a> Converter<'a> {
             "Switch" => {
                 let transforms = state.transforms.clone();
                 let switched = self.convert_switch(node, state)?;
+                self.remember_emitted_definition(&switched, state);
                 let emitted = self.wrap_transforms(switched, &transforms);
                 Ok(vec![self.store_emitted_definition(emitted, state)])
             }
             "WWWAnchor" => {
                 let transforms = state.transforms.clone();
                 let anchor = self.convert_anchor(node, state)?;
+                self.remember_emitted_definition(&anchor, state);
                 let emitted = self.wrap_transforms(anchor, &transforms);
                 Ok(vec![self.store_emitted_definition(emitted, state)])
             }
             "WWWInline" => {
                 let transforms = state.transforms.clone();
                 let inline = self.convert_inline(node);
+                self.remember_emitted_definition(&inline, state);
                 let emitted = self.wrap_transforms(inline, &transforms);
                 Ok(vec![self.store_emitted_definition(emitted, state)])
             }
             "LOD" => {
                 let transforms = state.transforms.clone();
                 let lod = self.convert_lod(node, state)?;
+                self.remember_emitted_definition(&lod, state);
                 let emitted = self.wrap_transforms(lod, &transforms);
                 Ok(vec![self.store_emitted_definition(emitted, state)])
             }
             "PerspectiveCamera" | "OrthographicCamera" => {
                 let transforms = state.transforms.clone();
-                let emitted = self.wrap_transforms(self.convert_camera(node), &transforms);
+                let camera = self.convert_camera(node);
+                self.remember_emitted_definition(&camera, state);
+                let emitted = self.wrap_transforms(camera, &transforms);
                 Ok(vec![self.store_emitted_definition(emitted, state)])
             }
             "DirectionalLight" | "PointLight" | "SpotLight" => {
                 let transforms = state.transforms.clone();
-                let emitted = self.wrap_transforms(self.convert_light(node), &transforms);
+                let light = self.convert_light(node);
+                self.remember_emitted_definition(&light, state);
+                let emitted = self.wrap_transforms(light, &transforms);
                 Ok(vec![self.store_emitted_definition(emitted, state)])
             }
             "IndexedFaceSet" | "Cube" | "AsciiText" | "IndexedLineSet" | "PointSet" | "Cone"
             | "Cylinder" | "Sphere" => {
                 let transforms = state.transforms.clone();
                 let shape = self.convert_shape(node, state)?;
+                self.remember_emitted_definition(&shape, state);
                 let emitted = self.wrap_transforms(shape, &transforms);
                 Ok(vec![self.store_emitted_definition(emitted, state)])
             }
@@ -405,12 +414,13 @@ impl<'a> Converter<'a> {
             return Ok(Vec::new());
         }
 
-        if node.def_name.is_some() || children.len() > 1 {
+        if node.def_name.is_some() || (children.len() > 1 && node.node_type == "Group") {
             let mut group = OutNode::new("Group");
             group.def_name = node.def_name.clone();
             group
                 .fields
                 .push(("children".to_owned(), Value::List(node_list(children))));
+            self.remember_emitted_definition(&group, state);
             return Ok(vec![self.store_emitted_definition(
                 self.wrap_transforms(group, &state.transforms),
                 state,
@@ -421,6 +431,7 @@ impl<'a> Converter<'a> {
             .into_iter()
             .next()
             .ok_or_else(|| VrmlError::from("Expected group child"))?;
+        self.remember_emitted_definition(&child, state);
         Ok(vec![self.store_emitted_definition(
             self.wrap_transforms(child, &state.transforms),
             state,
@@ -706,15 +717,8 @@ impl<'a> Converter<'a> {
         let mut out = OutNode::new("PointSet");
 
         if let Some(coordinate) = &state.coordinate {
-            out.fields.push((
-                "coord".to_owned(),
-                self.slice_coordinate_value(coordinate, node)?,
-            ));
-        }
-
-        if let Some((color_node, _)) = self.build_color_node(state, node)? {
             out.fields
-                .push(("color".to_owned(), Value::Node(Box::new(color_node))));
+                .push(("coord".to_owned(), self.node_ref_to_value(coordinate)?));
         }
 
         Ok(out)
@@ -724,14 +728,17 @@ impl<'a> Converter<'a> {
     fn convert_cone(&self, node: &AstNode) -> OutNode {
         let parts = self.bitmask_parts(node.fields.get("parts"), &["ALL"]);
         let mut out = OutNode::new("Cone");
-        out.fields.push((
-            "bottomRadius".to_owned(),
-            Value::Float(self.float_field(node, "bottomRadius").unwrap_or(1.0)),
-        ));
-        out.fields.push((
-            "height".to_owned(),
-            Value::Float(self.float_field(node, "height").unwrap_or(2.0)),
-        ));
+        if let Some(bottom_radius) = self.float_field(node, "bottomRadius") {
+            if (bottom_radius - 1.0).abs() > 1e-9 {
+                out.fields
+                    .push(("bottomRadius".to_owned(), Value::Float(bottom_radius)));
+            }
+        }
+        if let Some(height) = self.float_field(node, "height") {
+            if (height - 2.0).abs() > 1e-9 {
+                out.fields.push(("height".to_owned(), Value::Float(height)));
+            }
+        }
         if !parts.iter().any(|part| part == "ALL" || part == "BOTTOM") {
             out.fields.push(("bottom".to_owned(), Value::Bool(false)));
         }
@@ -745,14 +752,16 @@ impl<'a> Converter<'a> {
     fn convert_cylinder(&self, node: &AstNode) -> OutNode {
         let parts = self.bitmask_parts(node.fields.get("parts"), &["ALL"]);
         let mut out = OutNode::new("Cylinder");
-        out.fields.push((
-            "radius".to_owned(),
-            Value::Float(self.float_field(node, "radius").unwrap_or(1.0)),
-        ));
-        out.fields.push((
-            "height".to_owned(),
-            Value::Float(self.float_field(node, "height").unwrap_or(2.0)),
-        ));
+        if let Some(radius) = self.float_field(node, "radius") {
+            if (radius - 1.0).abs() > 1e-9 {
+                out.fields.push(("radius".to_owned(), Value::Float(radius)));
+            }
+        }
+        if let Some(height) = self.float_field(node, "height") {
+            if (height - 2.0).abs() > 1e-9 {
+                out.fields.push(("height".to_owned(), Value::Float(height)));
+            }
+        }
         if !parts.iter().any(|part| part == "ALL" || part == "BOTTOM") {
             out.fields.push(("bottom".to_owned(), Value::Bool(false)));
         }
@@ -768,10 +777,11 @@ impl<'a> Converter<'a> {
     /// Convert a VRML 1.0 `Sphere`.
     fn convert_sphere(&self, node: &AstNode) -> OutNode {
         let mut out = OutNode::new("Sphere");
-        out.fields.push((
-            "radius".to_owned(),
-            Value::Float(self.float_field(node, "radius").unwrap_or(1.0)),
-        ));
+        if let Some(radius) = self.float_field(node, "radius") {
+            if (radius - 1.0).abs() > 1e-9 {
+                out.fields.push(("radius".to_owned(), Value::Float(radius)));
+            }
+        }
         out
     }
 
@@ -970,12 +980,7 @@ impl<'a> Converter<'a> {
         if material.diffuse_colors.is_empty() {
             return Ok(None);
         }
-        if material.diffuse_colors.len() == 1
-            && !matches!(
-                geometry_node.node_type.as_str(),
-                "IndexedLineSet" | "PointSet"
-            )
-        {
+        if material.diffuse_colors.len() == 1 {
             return Ok(None);
         }
 
@@ -1141,12 +1146,11 @@ impl<'a> Converter<'a> {
     }
 
     /// Wrap one emitted node in the currently active transforms.
-    fn wrap_transforms(&self, mut node: OutNode, transforms: &[TransformSpec]) -> OutNode {
+    fn wrap_transforms(&self, node: OutNode, transforms: &[TransformSpec]) -> OutNode {
         if transforms.is_empty() {
             return node;
         }
 
-        let def_name = node.def_name.take();
         let mut wrapped = node;
         for transform in transforms.iter().rev() {
             match transform.kind {
@@ -1193,8 +1197,16 @@ impl<'a> Converter<'a> {
                 }
             }
         }
-        wrapped.def_name = def_name;
         wrapped
+    }
+
+    /// Remember one emitted node definition before transforms wrap around it.
+    fn remember_emitted_definition(&self, node: &OutNode, state: &mut ConversionState) {
+        if let Some(def_name) = &node.def_name {
+            state
+                .definitions
+                .insert(def_name.clone(), DefinitionValue::Node(node.clone()));
+        }
     }
 
     /// Register a reusable node definition and return the corresponding node reference.
@@ -1241,7 +1253,7 @@ impl<'a> Converter<'a> {
                 _ => {
                     state
                         .definitions
-                        .insert(def_name.clone(), DefinitionValue::Node);
+                        .insert(def_name.clone(), DefinitionValue::Node(value.clone()));
                 }
             }
             return NodeRef::Defined(def_name.clone(), value);
@@ -1254,7 +1266,7 @@ impl<'a> Converter<'a> {
         if let Some(def_name) = &node.def_name {
             state
                 .definitions
-                .insert(def_name.clone(), DefinitionValue::Node);
+                .insert(def_name.clone(), DefinitionValue::Node(node.clone()));
         }
         node
     }
@@ -1298,16 +1310,11 @@ impl<'a> Converter<'a> {
                 state.font_style = Some(NodeRef::Defined(use_ref.name.clone(), node));
                 Ok(Vec::new())
             }
-            DefinitionValue::Node => Ok(vec![{
-                let mut out = OutNode::new("Transform");
-                out.fields.push((
-                    "children".to_owned(),
-                    Value::List(vec![Value::Use(UseRef {
-                        name: use_ref.name.clone(),
-                    })]),
-                ));
-                out
-            }]),
+            DefinitionValue::Node(node) => {
+                let mut expanded = node.clone();
+                expanded.def_name = None;
+                Ok(vec![self.wrap_transforms(expanded, &state.transforms)])
+            }
         }
     }
 
