@@ -35,23 +35,8 @@ struct Converter<'a> {
 /// Track one persistent transform operation from VRML 1.0 traversal.
 #[derive(Clone, Debug)]
 struct TransformSpec {
-    /// Identify the transform field to emit.
-    kind: TransformKind,
-    /// Store the transform value.
-    value: Value,
-}
-
-/// Enumerate supported persistent transform kinds.
-#[derive(Clone, Debug)]
-enum TransformKind {
-    /// Translation transform.
-    Translation,
-    /// Rotation transform.
-    Rotation,
-    /// Scale transform.
-    Scale,
-    /// Matrix transform approximated through supported VRML 2.0 fields.
-    Matrix,
+    /// Store the VRML 2.0 transform fields emitted together in one node.
+    fields: Vec<(String, Value)>,
 }
 
 /// Hold the current material state for geometry conversion.
@@ -293,8 +278,7 @@ impl<'a> Converter<'a> {
             "Translation" => {
                 if let Some(value) = node.fields.get("translation") {
                     state.transforms.push(TransformSpec {
-                        kind: TransformKind::Translation,
-                        value: value.clone(),
+                        fields: vec![("translation".to_owned(), value.clone())],
                     });
                 }
                 Ok(Vec::new())
@@ -302,8 +286,7 @@ impl<'a> Converter<'a> {
             "Rotation" => {
                 if let Some(value) = node.fields.get("rotation") {
                     state.transforms.push(TransformSpec {
-                        kind: TransformKind::Rotation,
-                        value: value.clone(),
+                        fields: vec![("rotation".to_owned(), value.clone())],
                     });
                 }
                 Ok(Vec::new())
@@ -311,33 +294,35 @@ impl<'a> Converter<'a> {
             "Scale" => {
                 if let Some(value) = node.fields.get("scaleFactor") {
                     state.transforms.push(TransformSpec {
-                        kind: TransformKind::Scale,
-                        value: value.clone(),
+                        fields: vec![("scale".to_owned(), value.clone())],
                     });
                 }
                 Ok(Vec::new())
             }
             "MatrixTransform" => {
                 if let Some(value) = node.fields.get("matrix") {
-                    state.transforms.push(TransformSpec {
-                        kind: TransformKind::Matrix,
-                        value: value.clone(),
-                    });
+                    let fields = self.matrix_to_transform_fields(value);
+                    if !fields.is_empty() {
+                        state.transforms.push(TransformSpec { fields });
+                    }
                 }
                 Ok(Vec::new())
             }
             "Transform" => {
-                for (field_name, kind) in [
-                    ("translation", TransformKind::Translation),
-                    ("rotation", TransformKind::Rotation),
-                    ("scaleFactor", TransformKind::Scale),
+                let mut fields = Vec::new();
+                for (field_name, output_name) in [
+                    ("translation", "translation"),
+                    ("rotation", "rotation"),
+                    ("scaleFactor", "scale"),
+                    ("center", "center"),
+                    ("scaleOrientation", "scaleOrientation"),
                 ] {
                     if let Some(value) = node.fields.get(field_name) {
-                        state.transforms.push(TransformSpec {
-                            kind: kind.clone(),
-                            value: value.clone(),
-                        });
+                        fields.push((output_name.to_owned(), value.clone()));
                     }
+                }
+                if !fields.is_empty() {
+                    state.transforms.push(TransformSpec { fields });
                 }
                 Ok(Vec::new())
             }
@@ -401,7 +386,7 @@ impl<'a> Converter<'a> {
         }
     }
 
-    /// Convert a grouping node while localizing inherited transforms inside the group.
+    /// Convert a grouping node while preserving all emitted children inside the group.
     fn convert_group_like(
         &mut self,
         node: &AstNode,
@@ -410,11 +395,12 @@ impl<'a> Converter<'a> {
         let mut child_state = state.clone();
         child_state.transforms.clear();
         let children = self.convert_sequence(&node.children, &mut child_state)?;
+        state.definitions = child_state.definitions.clone();
         if children.is_empty() {
             return Ok(Vec::new());
         }
 
-        if node.def_name.is_some() || (children.len() > 1 && node.node_type == "Group") {
+        if node.def_name.is_some() || children.len() > 1 {
             let mut group = OutNode::new("Group");
             group.def_name = node.def_name.clone();
             group
@@ -711,7 +697,7 @@ impl<'a> Converter<'a> {
     /// Convert a VRML 1.0 `PointSet`.
     fn convert_point_set(
         &mut self,
-        node: &AstNode,
+        _node: &AstNode,
         state: &mut ConversionState,
     ) -> Result<OutNode, VrmlError> {
         let mut out = OutNode::new("PointSet");
@@ -1153,49 +1139,13 @@ impl<'a> Converter<'a> {
 
         let mut wrapped = node;
         for transform in transforms.iter().rev() {
-            match transform.kind {
-                TransformKind::Translation => {
-                    let mut out = OutNode::new("Transform");
-                    out.fields
-                        .push(("translation".to_owned(), transform.value.clone()));
-                    out.fields.push((
-                        "children".to_owned(),
-                        Value::List(vec![Value::Node(Box::new(wrapped))]),
-                    ));
-                    wrapped = out;
-                }
-                TransformKind::Rotation => {
-                    let mut out = OutNode::new("Transform");
-                    out.fields
-                        .push(("rotation".to_owned(), transform.value.clone()));
-                    out.fields.push((
-                        "children".to_owned(),
-                        Value::List(vec![Value::Node(Box::new(wrapped))]),
-                    ));
-                    wrapped = out;
-                }
-                TransformKind::Scale => {
-                    let mut out = OutNode::new("Transform");
-                    out.fields
-                        .push(("scale".to_owned(), transform.value.clone()));
-                    out.fields.push((
-                        "children".to_owned(),
-                        Value::List(vec![Value::Node(Box::new(wrapped))]),
-                    ));
-                    wrapped = out;
-                }
-                TransformKind::Matrix => {
-                    let mut out = OutNode::new("Transform");
-                    for (field_name, value) in self.matrix_to_transform_fields(&transform.value) {
-                        out.fields.push((field_name, value));
-                    }
-                    out.fields.push((
-                        "children".to_owned(),
-                        Value::List(vec![Value::Node(Box::new(wrapped))]),
-                    ));
-                    wrapped = out;
-                }
-            }
+            let mut out = OutNode::new("Transform");
+            out.fields.extend(transform.fields.clone());
+            out.fields.push((
+                "children".to_owned(),
+                Value::List(vec![Value::Node(Box::new(wrapped))]),
+            ));
+            wrapped = out;
         }
         wrapped
     }
@@ -1586,7 +1536,7 @@ impl<'a> Converter<'a> {
         parts
     }
 
-    /// Approximate a matrix transform with VRML 2.0 translation and scale fields.
+    /// Approximate a matrix transform with VRML 2.0 translation, rotation, and scale fields.
     fn matrix_to_transform_fields(&self, value: &Value) -> Vec<(String, Value)> {
         let Value::List(values) = value else {
             return Vec::new();
@@ -1601,19 +1551,111 @@ impl<'a> Converter<'a> {
         }
 
         let scale = vec![
-            (matrix[0] * matrix[0] + matrix[1] * matrix[1] + matrix[2] * matrix[2]).sqrt(),
-            (matrix[4] * matrix[4] + matrix[5] * matrix[5] + matrix[6] * matrix[6]).sqrt(),
-            (matrix[8] * matrix[8] + matrix[9] * matrix[9] + matrix[10] * matrix[10]).sqrt(),
+            (matrix[0] * matrix[0] + matrix[4] * matrix[4] + matrix[8] * matrix[8]).sqrt(),
+            (matrix[1] * matrix[1] + matrix[5] * matrix[5] + matrix[9] * matrix[9]).sqrt(),
+            (matrix[2] * matrix[2] + matrix[6] * matrix[6] + matrix[10] * matrix[10]).sqrt(),
+        ];
+        let rotation_matrix = [
+            [
+                if scale[0].abs() > 1e-9 {
+                    matrix[0] / scale[0]
+                } else {
+                    matrix[0]
+                },
+                if scale[1].abs() > 1e-9 {
+                    matrix[4] / scale[1]
+                } else {
+                    matrix[4]
+                },
+                if scale[2].abs() > 1e-9 {
+                    matrix[8] / scale[2]
+                } else {
+                    matrix[8]
+                },
+            ],
+            [
+                if scale[0].abs() > 1e-9 {
+                    matrix[1] / scale[0]
+                } else {
+                    matrix[1]
+                },
+                if scale[1].abs() > 1e-9 {
+                    matrix[5] / scale[1]
+                } else {
+                    matrix[5]
+                },
+                if scale[2].abs() > 1e-9 {
+                    matrix[9] / scale[2]
+                } else {
+                    matrix[9]
+                },
+            ],
+            [
+                if scale[0].abs() > 1e-9 {
+                    matrix[2] / scale[0]
+                } else {
+                    matrix[2]
+                },
+                if scale[1].abs() > 1e-9 {
+                    matrix[6] / scale[1]
+                } else {
+                    matrix[6]
+                },
+                if scale[2].abs() > 1e-9 {
+                    matrix[10] / scale[2]
+                } else {
+                    matrix[10]
+                },
+            ],
         ];
 
-        let mut fields = vec![(
-            "translation".to_owned(),
-            Value::Vec(vec![matrix[12], matrix[13], matrix[14]]),
-        )];
-        if scale != vec![1.0, 1.0, 1.0] {
+        let mut fields = Vec::new();
+        let translation = vec![matrix[12], matrix[13], matrix[14]];
+        if translation.iter().any(|value| value.abs() > 1e-9) {
+            fields.push(("translation".to_owned(), Value::Vec(translation)));
+        }
+        if let Some(rotation) = self.rotation_from_matrix(rotation_matrix) {
+            fields.push(("rotation".to_owned(), rotation));
+        }
+        if scale
+            .iter()
+            .zip([1.0_f64, 1.0_f64, 1.0_f64].iter())
+            .any(|(left, right)| (left - right).abs() > 1e-9)
+        {
             fields.push(("scale".to_owned(), Value::Vec(scale)));
         }
         fields
+    }
+
+    /// Convert a normalized 3x3 rotation matrix into a VRML axis-angle rotation.
+    fn rotation_from_matrix(&self, matrix: [[f64; 3]; 3]) -> Option<Value> {
+        let trace = matrix[0][0] + matrix[1][1] + matrix[2][2];
+        let cosine = ((trace - 1.0) / 2.0).clamp(-1.0, 1.0);
+        let angle = cosine.acos();
+        if angle.abs() < 1e-9 {
+            return None;
+        }
+
+        if (std::f64::consts::PI - angle).abs() < 1e-6 {
+            let axis = [
+                ((matrix[0][0] + 1.0) / 2.0).max(0.0).sqrt(),
+                ((matrix[1][1] + 1.0) / 2.0).max(0.0).sqrt(),
+                ((matrix[2][2] + 1.0) / 2.0).max(0.0).sqrt(),
+            ];
+            return Some(Value::Vec(vec![axis[0], axis[1], axis[2], angle]));
+        }
+
+        let sine = (2.0 * angle.sin()).abs();
+        if sine < 1e-9 {
+            return None;
+        }
+
+        Some(Value::Vec(vec![
+            (matrix[2][1] - matrix[1][2]) / (2.0 * angle.sin()),
+            (matrix[0][2] - matrix[2][0]) / (2.0 * angle.sin()),
+            (matrix[1][0] - matrix[0][1]) / (2.0 * angle.sin()),
+            angle,
+        ]))
     }
 }
 

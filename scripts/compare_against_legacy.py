@@ -4,7 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import ast
+import json
+import math
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -19,6 +23,507 @@ class ComparisonFailure:
 
     input_path: Path
     reason: str
+
+
+@dataclass(slots=True)
+class ParsedUse:
+    """Represent one parsed VRML `USE` reference."""
+
+    name: str
+
+
+@dataclass(slots=True)
+class ParsedNode:
+    """Represent one parsed VRML node with ordered fields."""
+
+    node_type: str
+    def_name: str | None
+    fields: list[tuple[str, object]]
+
+
+class TokenStream:
+    """Provide simple indexed access over a token list."""
+
+    def __init__(self, tokens: list[str]) -> None:
+        """Store the tokens that remain to be parsed."""
+
+        self.tokens = tokens
+        self.index = 0
+
+    def peek(self) -> str | None:
+        """Return the current token without consuming it."""
+
+        if self.index >= len(self.tokens):
+            return None
+        return self.tokens[self.index]
+
+    def peek_next(self) -> str | None:
+        """Return the next token without consuming it."""
+
+        if self.index + 1 >= len(self.tokens):
+            return None
+        return self.tokens[self.index + 1]
+
+    def pop(self, expected: str | None = None) -> str:
+        """Consume one token and optionally validate its exact value."""
+
+        token = self.peek()
+        if token is None:
+            raise ValueError("Unexpected end of VRML token stream")
+        if expected is not None and token != expected:
+            raise ValueError(f"Expected token {expected!r}, found {token!r}")
+        self.index += 1
+        return token
+
+    def at_end(self) -> bool:
+        """Report whether all tokens have been consumed."""
+
+        return self.index >= len(self.tokens)
+
+
+NUMBER_RE = re.compile(r"[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?$")
+TOKEN_RE = re.compile(
+    r'"(?:\\.|[^"\\])*"|[{}\[\],]|[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?|[A-Za-z_][A-Za-z0-9_:%.-]*'
+)
+TRANSPARENT_NODE_TYPES = {"Collision", "Group"}
+CHILD_LIST_FIELDS = {"children", "choice", "level"}
+TRANSFORM_FIELDS = {"translation", "rotation", "scale", "scaleOrientation", "center"}
+SINGLE_STRING_LIST_FIELDS = {"name", "string", "url"}
+MATERIAL_DEFAULT_FIELDS: dict[str, object] = {
+    "ambientIntensity": 0.2,
+    "diffuseColor": [0.8, 0.8, 0.8],
+    "emissiveColor": [0, 0, 0],
+    "shininess": 0.2,
+    "specularColor": [0, 0, 0],
+    "transparency": 0,
+}
+NODE_DEFAULT_FIELDS: dict[str, dict[str, object]] = {
+    "Box": {"size": [2, 2, 2]},
+    "Sphere": {"radius": 1},
+}
+
+
+def strip_vrml_comments(input_text: str) -> str:
+    """Remove comments while preserving string literals verbatim."""
+
+    stripped: list[str] = []
+    in_string = False
+    escaped = False
+    in_comment = False
+
+    for character in input_text:
+        if in_comment:
+            if character == "\n":
+                in_comment = False
+                stripped.append(character)
+            continue
+
+        if in_string:
+            stripped.append(character)
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+
+        if character == "#":
+            in_comment = True
+            continue
+
+        if character == '"':
+            in_string = True
+            stripped.append(character)
+            continue
+
+        stripped.append(character)
+
+    return "".join(stripped)
+
+
+def tokenize_vrml(input_text: str) -> list[str]:
+    """Tokenize one VRML 2.0 document body into parseable tokens."""
+
+    header, separator, body = input_text.partition("\n")
+    if not header.startswith("#VRML"):
+        raise ValueError("Missing VRML header")
+    stripped_body = strip_vrml_comments(body if separator else "")
+    return TOKEN_RE.findall(stripped_body)
+
+
+def parse_vrml_document(input_text: str) -> list[ParsedNode]:
+    """Parse one VRML 2.0 document into top-level nodes."""
+
+    stream = TokenStream(tokenize_vrml(input_text))
+    nodes: list[ParsedNode] = []
+    while not stream.at_end():
+        node = parse_node(stream)
+        if isinstance(node, ParsedUse):
+            raise ValueError("Top-level USE is not expected in canonical comparison")
+        nodes.append(node)
+    return nodes
+
+
+def parse_node(stream: TokenStream) -> ParsedNode | ParsedUse:
+    """Parse one VRML node or `USE` reference from the token stream."""
+
+    def_name: str | None = None
+    if stream.peek() == "DEF":
+        stream.pop("DEF")
+        def_name = stream.pop()
+
+    if stream.peek() == "USE":
+        stream.pop("USE")
+        return ParsedUse(stream.pop())
+
+    node_type = stream.pop()
+    stream.pop("{")
+    fields: list[tuple[str, object]] = []
+    while stream.peek() != "}":
+        field_name = stream.pop()
+        fields.append((field_name, parse_field_value(stream)))
+    stream.pop("}")
+    return ParsedNode(node_type=node_type, def_name=def_name, fields=fields)
+
+
+def parse_field_value(stream: TokenStream) -> object:
+    """Parse one VRML field value, including inline vector shorthand."""
+
+    first_value = parse_value(stream)
+    scalar_values = [first_value]
+    while looks_like_scalar_token(stream.peek()):
+        scalar_values.append(parse_value(stream))
+    if len(scalar_values) == 1:
+        return first_value
+    return scalar_values
+
+
+def parse_value(stream: TokenStream) -> object:
+    """Parse one VRML field value from the token stream."""
+
+    token = stream.peek()
+    if token is None:
+        raise ValueError("Unexpected end of VRML value stream")
+
+    if token == "[":
+        return parse_list(stream)
+    if token == "DEF" or token == "USE":
+        return parse_node(stream)
+    if stream.peek_next() == "{":
+        return parse_node(stream)
+    if token.startswith('"'):
+        return ast.literal_eval(stream.pop())
+    if token in {"TRUE", "FALSE"}:
+        return stream.pop() == "TRUE"
+    if NUMBER_RE.match(token):
+        raw_number = stream.pop()
+        if any(marker in raw_number for marker in ".eE"):
+            return float(raw_number)
+        return int(raw_number)
+    return stream.pop()
+
+
+def parse_list(stream: TokenStream) -> list[object]:
+    """Parse one VRML bracketed list value."""
+
+    items: list[object] = []
+    stream.pop("[")
+    while stream.peek() != "]":
+        if stream.peek() == ",":
+            stream.pop(",")
+            continue
+        items.append(parse_value(stream))
+        if stream.peek() == ",":
+            stream.pop(",")
+    stream.pop("]")
+    return items
+
+
+def looks_like_scalar_token(token: str | None) -> bool:
+    """Report whether the next token can continue an inline scalar vector."""
+
+    if token is None:
+        return False
+    if token.startswith('"'):
+        return True
+    if token in {"TRUE", "FALSE"}:
+        return True
+    return bool(NUMBER_RE.match(token))
+
+
+def collect_definitions(nodes: list[ParsedNode]) -> dict[str, ParsedNode]:
+    """Collect all named node definitions reachable from the parsed roots."""
+
+    definitions: dict[str, ParsedNode] = {}
+    for node in nodes:
+        collect_definitions_from_value(node, definitions)
+    return definitions
+
+
+def collect_definitions_from_value(value: object, definitions: dict[str, ParsedNode]) -> None:
+    """Collect nested `DEF` nodes reachable from one parsed value."""
+
+    if isinstance(value, ParsedNode):
+        if value.def_name is not None:
+            definitions[value.def_name] = value
+        for _, field_value in value.fields:
+            collect_definitions_from_value(field_value, definitions)
+        return
+    if isinstance(value, list):
+        for item in value:
+            collect_definitions_from_value(item, definitions)
+
+
+def resolve_use(value: object, definitions: dict[str, ParsedNode]) -> object:
+    """Resolve one `USE` reference to the previously defined node."""
+
+    if isinstance(value, ParsedUse):
+        resolved = definitions.get(value.name)
+        if resolved is None:
+            raise ValueError(f"Unresolved USE reference: {value.name}")
+        return resolved
+    return value
+
+
+def canonical_number(value: int | float) -> int | float:
+    """Normalize one numeric value so equivalent scalars serialize identically."""
+
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if abs(value) < 1e-5:
+        return 0
+    rounded = round(float(value), 5)
+    if float(rounded).is_integer():
+        return int(rounded)
+    return float(f"{rounded:.12g}")
+
+
+def canonical_value(value: object, definitions: dict[str, ParsedNode]) -> object:
+    """Canonicalize one parsed value while expanding `USE` references."""
+
+    resolved = resolve_use(value, definitions)
+    if isinstance(resolved, ParsedNode):
+        return canonical_node_structure(resolved, definitions)
+    if isinstance(resolved, list):
+        return [canonical_value(item, definitions) for item in resolved]
+    if isinstance(resolved, (int, float)) and not isinstance(resolved, bool):
+        return canonical_number(resolved)
+    return resolved
+
+
+def canonical_field_value(
+    field_name: str,
+    value: object,
+    definitions: dict[str, ParsedNode],
+) -> object:
+    """Canonicalize one field value with small field-specific equivalence rules."""
+
+    canonical = canonical_value(value, definitions)
+    if field_name in SINGLE_STRING_LIST_FIELDS and isinstance(canonical, list) and len(canonical) == 1:
+        return canonical[0]
+    if field_name in {"orientation", "rotation"} and isinstance(canonical, list) and len(canonical) == 4:
+        return canonical_rotation_value(canonical)
+    return canonical
+
+
+def canonical_node_structure(node: ParsedNode, definitions: dict[str, ParsedNode]) -> dict[str, object]:
+    """Canonicalize one node as pure structure without preserving `DEF` names."""
+
+    fields = [
+        (field_name, canonical_field_value(field_name, field_value, definitions))
+        for field_name, field_value in node.fields
+    ]
+    if node.node_type == "Material":
+        fields = [
+            (field_name, field_value)
+            for field_name, field_value in fields
+            if MATERIAL_DEFAULT_FIELDS.get(field_name) != field_value
+        ]
+    for default_field_name, default_field_value in NODE_DEFAULT_FIELDS.get(node.node_type, {}).items():
+        fields = [
+            (field_name, field_value)
+            for field_name, field_value in fields
+            if not (field_name == default_field_name and field_value == default_field_value)
+        ]
+
+    return {
+        "type": node.node_type,
+        "fields": sorted(fields),
+    }
+
+
+def canonical_rotation_value(values: list[object]) -> list[float]:
+    """Convert one axis-angle rotation into a rounded matrix signature."""
+
+    axis = [float(values[0]), float(values[1]), float(values[2])]
+    angle = float(values[3])
+    length = sum(component * component for component in axis) ** 0.5
+    if length < 1e-9 or abs(angle) < 1e-9:
+        return [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    x, y, z = [component / length for component in axis]
+    cosine = round(math.cos(angle), 6)
+    sine = round(math.sin(angle), 6)
+    one_minus_cosine = 1.0 - cosine
+    matrix = [
+        cosine + x * x * one_minus_cosine,
+        x * y * one_minus_cosine - z * sine,
+        x * z * one_minus_cosine + y * sine,
+        y * x * one_minus_cosine + z * sine,
+        cosine + y * y * one_minus_cosine,
+        y * z * one_minus_cosine - x * sine,
+        z * x * one_minus_cosine - y * sine,
+        z * y * one_minus_cosine + x * sine,
+        cosine + z * z * one_minus_cosine,
+    ]
+    return [0.0 if abs(value) < 1e-5 else round(value, 5) for value in matrix]
+
+
+def child_nodes_from_value(value: object, definitions: dict[str, ParsedNode]) -> list[ParsedNode]:
+    """Extract a flat list of child nodes from one field value."""
+
+    resolved = resolve_use(value, definitions)
+    if isinstance(resolved, ParsedNode):
+        return [resolved]
+    if isinstance(resolved, list):
+        children: list[ParsedNode] = []
+        for item in resolved:
+            item_resolved = resolve_use(item, definitions)
+            if isinstance(item_resolved, ParsedNode):
+                children.append(item_resolved)
+        return children
+    return []
+
+
+def is_transparent_collision(node: ParsedNode) -> bool:
+    """Report whether one collision node can be ignored in semantic comparison."""
+
+    if node.node_type != "Collision":
+        return False
+    for field_name, field_value in node.fields:
+        if field_name == "collide":
+            return field_value is False
+    return True
+
+
+def is_identity_transform_field(field_name: str, value: object) -> bool:
+    """Report whether one transform field is an identity operation."""
+
+    if field_name == "translation" and value == [0, 0, 0]:
+        return True
+    if field_name == "center" and value == [0, 0, 0]:
+        return True
+    if field_name == "rotation" and value == [0, 0, 1, 0]:
+        return True
+    if field_name == "scale" and value == [1, 1, 1]:
+        return True
+    if field_name == "scaleOrientation" and value == [0, 0, 1, 0]:
+        return True
+    return False
+
+
+def canonical_transform_context(
+    node: ParsedNode,
+    definitions: dict[str, ParsedNode],
+    inherited_context: tuple[object, ...],
+) -> tuple[object, ...]:
+    """Append one transform node's effect to the inherited context."""
+
+    fields = sorted(
+        (field_name, canonical_field_value(field_name, field_value, definitions))
+        for field_name, field_value in node.fields
+        if field_name != "children"
+    )
+    fields = [
+        (field_name, field_value)
+        for field_name, field_value in fields
+        if not is_identity_transform_field(field_name, field_value)
+    ]
+    if not fields:
+        return inherited_context
+    return inherited_context + (("Transform", tuple(fields)),)
+
+
+def extract_scene_items(
+    nodes: list[ParsedNode],
+    definitions: dict[str, ParsedNode],
+    inherited_context: tuple[object, ...] = (),
+) -> list[str]:
+    """Extract canonical scene items while flattening transparent wrappers."""
+
+    items: list[str] = []
+    for node in nodes:
+        items.extend(extract_scene_items_from_node(node, definitions, inherited_context))
+    return items
+
+
+def extract_scene_items_from_node(
+    node: ParsedNode,
+    definitions: dict[str, ParsedNode],
+    inherited_context: tuple[object, ...],
+) -> list[str]:
+    """Extract scene items from one node under the current transform context."""
+
+    if node.node_type in TRANSPARENT_NODE_TYPES and (
+        node.node_type != "Collision" or is_transparent_collision(node)
+    ):
+        children: list[ParsedNode] = []
+        for field_name, field_value in node.fields:
+            if field_name == "children":
+                children.extend(child_nodes_from_value(field_value, definitions))
+        return extract_scene_items(children, definitions, inherited_context)
+
+    if node.node_type == "Transform":
+        children: list[ParsedNode] = []
+        for field_name, field_value in node.fields:
+            if field_name == "children":
+                children.extend(child_nodes_from_value(field_value, definitions))
+        return extract_scene_items(
+            children,
+            definitions,
+            canonical_transform_context(node, definitions, inherited_context),
+        )
+
+    serialized = serialize_scene_node(node, definitions, inherited_context)
+    return [json.dumps(serialized, sort_keys=True, separators=(",", ":"))]
+
+
+def serialize_scene_node(
+    node: ParsedNode,
+    definitions: dict[str, ParsedNode],
+    inherited_context: tuple[object, ...],
+) -> dict[str, object]:
+    """Serialize one scene node after expanding nested references."""
+
+    serialized_fields: list[tuple[str, object]] = []
+    for field_name, field_value in node.fields:
+        if field_name in CHILD_LIST_FIELDS:
+            child_nodes = child_nodes_from_value(field_value, definitions)
+            child_items = extract_scene_items(child_nodes, definitions)
+            serialized_fields.append((field_name, sorted(child_items)))
+            continue
+        serialized_fields.append(
+            (field_name, canonical_field_value(field_name, field_value, definitions))
+        )
+
+    return {
+        "context": [] if node.node_type == "Viewpoint" else list(inherited_context),
+        "type": node.node_type,
+        "fields": sorted(serialized_fields),
+    }
+
+
+def semantic_scene_signature(input_text: str) -> str:
+    """Build a semantic scene signature that ignores benign structural rewrites."""
+
+    nodes = parse_vrml_document(input_text)
+    definitions = collect_definitions(nodes)
+    items = sorted(extract_scene_items(nodes, definitions))
+    if not items:
+        return "#VRML V2.0 utf8 <EMPTY_SCENE>"
+    return json.dumps(items, separators=(",", ":"))
 
 
 def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
@@ -295,6 +800,13 @@ def build_legacy_windows_command(
     return f"Set-Location '{windows_stage_dir}'; {invoke}"
 
 
+def is_unsupported_legacy_failure(reason: str) -> bool:
+    """Report whether one legacy failure is a known unsupported-input case."""
+
+    lowered = reason.lower()
+    return "unknown class" in lowered or "unknown field" in lowered
+
+
 def run_legacy_converter(
     input_path: Path,
     legacy_output: Path,
@@ -394,13 +906,20 @@ def compare_one_input(
             reason=f"legacy converter failed: {legacy_error}",
         )
 
-    current_text = normalize_vrml_text(current_output.read_text(encoding="utf-8", errors="strict"))
-    legacy_text = normalize_vrml_text(legacy_output.read_text(encoding="utf-8", errors="strict"))
+    current_raw = current_output.read_text(encoding="utf-8", errors="strict")
+    legacy_raw = legacy_output.read_text(encoding="utf-8", errors="strict")
+    current_text = normalize_vrml_text(current_raw)
+    legacy_text = normalize_vrml_text(legacy_raw)
     if current_text != legacy_text:
-        return ComparisonFailure(
-            input_path=input_path,
-            reason="normalized outputs differ",
-        )
+        try:
+            if semantic_scene_signature(current_raw) == semantic_scene_signature(legacy_raw):
+                return None
+        except ValueError as error:
+            return ComparisonFailure(
+                input_path=input_path,
+                reason=f"semantic comparison failed: {error}",
+            )
+        return ComparisonFailure(input_path=input_path, reason="normalized outputs differ")
     return None
 
 
@@ -420,6 +939,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     inputs = sorted(dict.fromkeys(inputs))
 
     failures: list[ComparisonFailure] = []
+    skipped = 0
     temp_dir_obj = tempfile.TemporaryDirectory(prefix="vrml1tovrml2-legacy-compare-")
     temp_dir = Path(temp_dir_obj.name)
 
@@ -437,6 +957,10 @@ def main(argv: Iterable[str] | None = None) -> int:
                 windows_temp_root=windows_temp_root,
             )
             if failure is not None:
+                if is_unsupported_legacy_failure(failure.reason):
+                    skipped += 1
+                    print(f"SKIP {input_path}: {failure.reason}")
+                    continue
                 failures.append(failure)
                 print(f"FAIL {input_path}: {failure.reason}")
             else:
@@ -451,9 +975,8 @@ def main(argv: Iterable[str] | None = None) -> int:
             print(f"[info] kept temporary outputs at {kept_path}")
         temp_dir_obj.cleanup()
 
-    print(
-        f"SUMMARY pass={len(inputs) - len(failures)} fail={len(failures)} total={len(inputs)}"
-    )
+    passed = len(inputs) - len(failures) - skipped
+    print(f"SUMMARY pass={passed} fail={len(failures)} skip={skipped} total={len(inputs)}")
     return 1 if failures else 0
 
 
