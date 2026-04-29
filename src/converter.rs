@@ -73,8 +73,8 @@ enum DefinitionValue {
     TextureTransform(OutNode),
     /// A font style definition that affects future text.
     FontStyle(OutNode),
-    /// A directly emitted output node that can later be referenced by `USE`.
-    Node(OutNode),
+    /// A source scene node that should be re-converted under the current state on `USE`.
+    Node(AstNode),
 }
 
 /// Track inherited VRML 1.0 state while traversing statements.
@@ -328,56 +328,57 @@ impl<'a> Converter<'a> {
             }
             "Separator" | "Group" | "TransformSeparator" => self.convert_group_like(node, state),
             "Switch" => {
+                self.register_scene_definition(node, state);
                 let transforms = state.transforms.clone();
                 let switched = self.convert_switch(node, state)?;
-                self.remember_emitted_definition(&switched, state);
                 let emitted = self.wrap_transforms(switched, &transforms);
                 Ok(vec![self.store_emitted_definition(emitted, state)])
             }
             "WWWAnchor" => {
+                self.register_scene_definition(node, state);
                 let transforms = state.transforms.clone();
                 let anchor = self.convert_anchor(node, state)?;
-                self.remember_emitted_definition(&anchor, state);
                 let emitted = self.wrap_transforms(anchor, &transforms);
                 Ok(vec![self.store_emitted_definition(emitted, state)])
             }
             "WWWInline" => {
+                self.register_scene_definition(node, state);
                 let transforms = state.transforms.clone();
                 let inline = self.convert_inline(node);
-                self.remember_emitted_definition(&inline, state);
                 let emitted = self.wrap_transforms(inline, &transforms);
                 Ok(vec![self.store_emitted_definition(emitted, state)])
             }
             "LOD" => {
+                self.register_scene_definition(node, state);
                 let transforms = state.transforms.clone();
                 let lod = self.convert_lod(node, state)?;
-                self.remember_emitted_definition(&lod, state);
                 let emitted = self.wrap_transforms(lod, &transforms);
                 Ok(vec![self.store_emitted_definition(emitted, state)])
             }
             "PerspectiveCamera" | "OrthographicCamera" => {
+                self.register_scene_definition(node, state);
                 let transforms = state.transforms.clone();
                 let camera = self.convert_camera(node);
-                self.remember_emitted_definition(&camera, state);
                 let emitted = self.wrap_transforms(camera, &transforms);
                 Ok(vec![self.store_emitted_definition(emitted, state)])
             }
             "DirectionalLight" | "PointLight" | "SpotLight" => {
+                self.register_scene_definition(node, state);
                 let transforms = state.transforms.clone();
                 let light = self.convert_light(node);
-                self.remember_emitted_definition(&light, state);
                 let emitted = self.wrap_transforms(light, &transforms);
                 Ok(vec![self.store_emitted_definition(emitted, state)])
             }
             "IndexedFaceSet" | "Cube" | "AsciiText" | "IndexedLineSet" | "PointSet" | "Cone"
             | "Cylinder" | "Sphere" => {
+                self.register_scene_definition(node, state);
                 let transforms = state.transforms.clone();
                 let shape = self.convert_shape(node, state)?;
-                self.remember_emitted_definition(&shape, state);
                 let emitted = self.wrap_transforms(shape, &transforms);
                 Ok(vec![self.store_emitted_definition(emitted, state)])
             }
             "Background" => {
+                self.register_scene_definition(node, state);
                 let emitted = self.simple_out_node(node, "Background");
                 Ok(vec![self.store_emitted_definition(emitted, state)])
             }
@@ -392,6 +393,7 @@ impl<'a> Converter<'a> {
         node: &AstNode,
         state: &mut ConversionState,
     ) -> Result<Vec<OutNode>, VrmlError> {
+        self.register_scene_definition(node, state);
         let mut child_state = state.clone();
         child_state.transforms.clear();
         let children = self.convert_sequence(&node.children, &mut child_state)?;
@@ -406,7 +408,6 @@ impl<'a> Converter<'a> {
             group
                 .fields
                 .push(("children".to_owned(), Value::List(node_list(children))));
-            self.remember_emitted_definition(&group, state);
             return Ok(vec![self.store_emitted_definition(
                 self.wrap_transforms(group, &state.transforms),
                 state,
@@ -417,7 +418,6 @@ impl<'a> Converter<'a> {
             .into_iter()
             .next()
             .ok_or_else(|| VrmlError::from("Expected group child"))?;
-        self.remember_emitted_definition(&child, state);
         Ok(vec![self.store_emitted_definition(
             self.wrap_transforms(child, &state.transforms),
             state,
@@ -433,6 +433,7 @@ impl<'a> Converter<'a> {
         let mut child_state = state.clone();
         child_state.transforms.clear();
         let children = self.convert_sequence(&node.children, &mut child_state)?;
+        state.definitions = child_state.definitions.clone();
         let mut out = OutNode::new("Switch");
         out.def_name = node.def_name.clone();
         out.fields.push((
@@ -456,6 +457,7 @@ impl<'a> Converter<'a> {
         let mut child_state = state.clone();
         child_state.transforms.clear();
         let children = self.convert_sequence(&node.children, &mut child_state)?;
+        state.definitions = child_state.definitions.clone();
         let mut out = OutNode::new("Anchor");
         out.def_name = node.def_name.clone();
         out.fields.push((
@@ -499,6 +501,7 @@ impl<'a> Converter<'a> {
         let mut child_state = state.clone();
         child_state.transforms.clear();
         let children = self.convert_sequence(&node.children, &mut child_state)?;
+        state.definitions = child_state.definitions.clone();
         let mut out = OutNode::new("LOD");
         out.def_name = node.def_name.clone();
         out.fields
@@ -1089,48 +1092,6 @@ impl<'a> Converter<'a> {
         Ok(Some(merged))
     }
 
-    /// Slice coordinates for `PointSet startIndex/numPoints`.
-    fn slice_coordinate_value(
-        &mut self,
-        coordinate: &NodeRef,
-        point_set: &AstNode,
-    ) -> Result<Value, VrmlError> {
-        if let NodeRef::Defined(name, _) = coordinate {
-            return Ok(Value::Use(UseRef { name: name.clone() }));
-        }
-        let source = self.materialize_node_reference(coordinate)?;
-        let point_values = source
-            .fields
-            .iter()
-            .find_map(|(name, value)| {
-                if name == "point" {
-                    Some(value.clone())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(Value::List(Vec::new()));
-
-        let points = match point_values {
-            Value::List(values) => values,
-            _ => Vec::new(),
-        };
-        let start_index = self.int_field(point_set, "startIndex").unwrap_or(0).max(0) as usize;
-        let num_points = self
-            .int_field(point_set, "numPoints")
-            .unwrap_or((points.len().saturating_sub(start_index)) as i32)
-            .max(0) as usize;
-        let sliced = points
-            .into_iter()
-            .skip(start_index)
-            .take(num_points)
-            .collect::<Vec<_>>();
-
-        let mut out = OutNode::new("Coordinate");
-        out.fields.push(("point".to_owned(), Value::List(sliced)));
-        Ok(Value::Node(Box::new(out)))
-    }
-
     /// Wrap one emitted node in the currently active transforms.
     fn wrap_transforms(&self, node: OutNode, transforms: &[TransformSpec]) -> OutNode {
         if transforms.is_empty() {
@@ -1150,8 +1111,21 @@ impl<'a> Converter<'a> {
         wrapped
     }
 
-    /// Remember one emitted node definition before transforms wrap around it.
-    fn remember_emitted_definition(&self, node: &OutNode, state: &mut ConversionState) {
+    /// Register one source scene definition so later `USE` statements can re-convert it.
+    fn register_scene_definition(&self, node: &AstNode, state: &mut ConversionState) {
+        if matches!(
+            node.node_type.as_str(),
+            "Material"
+                | "Coordinate3"
+                | "Normal"
+                | "TextureCoordinate2"
+                | "Texture2"
+                | "Texture2Transform"
+                | "Texture2Transformation"
+                | "FontStyle"
+        ) {
+            return;
+        }
         if let Some(def_name) = &node.def_name {
             state
                 .definitions
@@ -1200,11 +1174,7 @@ impl<'a> Converter<'a> {
                         .definitions
                         .insert(def_name.clone(), DefinitionValue::FontStyle(value.clone()));
                 }
-                _ => {
-                    state
-                        .definitions
-                        .insert(def_name.clone(), DefinitionValue::Node(value.clone()));
-                }
+                _ => {}
             }
             return NodeRef::Defined(def_name.clone(), value);
         }
@@ -1212,12 +1182,7 @@ impl<'a> Converter<'a> {
     }
 
     /// Store emitted node definitions so later `USE` statements can reference them.
-    fn store_emitted_definition(&self, node: OutNode, state: &mut ConversionState) -> OutNode {
-        if let Some(def_name) = &node.def_name {
-            state
-                .definitions
-                .insert(def_name.clone(), DefinitionValue::Node(node.clone()));
-        }
+    fn store_emitted_definition(&self, node: OutNode, _state: &mut ConversionState) -> OutNode {
         node
     }
 
@@ -1263,7 +1228,8 @@ impl<'a> Converter<'a> {
             DefinitionValue::Node(node) => {
                 let mut expanded = node.clone();
                 expanded.def_name = None;
-                Ok(vec![self.wrap_transforms(expanded, &state.transforms)])
+                let mut child_state = state.clone();
+                self.convert_node(&expanded, &mut child_state)
             }
         }
     }
@@ -1434,11 +1400,6 @@ impl<'a> Converter<'a> {
     /// Read a float field from a parsed node when present.
     fn float_field(&self, node: &AstNode, field_name: &str) -> Option<f64> {
         self.float_value(node.fields.get(field_name))
-    }
-
-    /// Read an integer field from a parsed node when present.
-    fn int_field(&self, node: &AstNode, field_name: &str) -> Option<i32> {
-        self.int_field_from_value(node.fields.get(field_name))
     }
 
     /// Read an integer-like value from an arbitrary parsed value.

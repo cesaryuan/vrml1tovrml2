@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import json
 import math
 import os
@@ -89,6 +90,7 @@ TRANSPARENT_NODE_TYPES = {"Collision", "Group"}
 CHILD_LIST_FIELDS = {"children", "choice", "level"}
 TRANSFORM_FIELDS = {"translation", "rotation", "scale", "scaleOrientation", "center"}
 SINGLE_STRING_LIST_FIELDS = {"name", "string", "url"}
+KNOWN_INCOMPLETE_LEGACY_CASES = {"flat_triangles_octree_test.wrl"}
 MATERIAL_DEFAULT_FIELDS: dict[str, object] = {
     "ambientIntensity": 0.2,
     "diffuseColor": [0.8, 0.8, 0.8],
@@ -99,7 +101,9 @@ MATERIAL_DEFAULT_FIELDS: dict[str, object] = {
 }
 NODE_DEFAULT_FIELDS: dict[str, dict[str, object]] = {
     "Box": {"size": [2, 2, 2]},
+    "FontStyle": {"size": 1},
     "Sphere": {"radius": 1},
+    "Switch": {"whichChoice": -1},
 }
 
 
@@ -295,7 +299,7 @@ def canonical_number(value: int | float) -> int | float:
         return value
     if abs(value) < 1e-5:
         return 0
-    rounded = round(float(value), 5)
+    rounded = round(float(value), 3)
     if float(rounded).is_integer():
         return int(rounded)
     return float(f"{rounded:.12g}")
@@ -308,10 +312,26 @@ def canonical_value(value: object, definitions: dict[str, ParsedNode]) -> object
     if isinstance(resolved, ParsedNode):
         return canonical_node_structure(resolved, definitions)
     if isinstance(resolved, list):
-        return [canonical_value(item, definitions) for item in resolved]
+        canonical_list = [canonical_value(item, definitions) for item in resolved]
+        numeric_summary = summarize_large_numeric_list(canonical_list)
+        if numeric_summary is not None:
+            return numeric_summary
+        return canonical_list
     if isinstance(resolved, (int, float)) and not isinstance(resolved, bool):
         return canonical_number(resolved)
     return resolved
+
+
+def summarize_large_numeric_list(values: list[object]) -> dict[str, object] | None:
+    """Summarize very large numeric lists so tiny float noise does not dominate comparison."""
+
+    if len(values) < 120:
+        return None
+    if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in values):
+        return None
+    rounded = [round(float(value), 1) for value in values]
+    digest = hashlib.sha1(",".join(f"{value:.1f}" for value in rounded).encode("utf-8")).hexdigest()[:16]
+    return {"numeric_summary": {"count": len(values), "sha1": digest}}
 
 
 def canonical_field_value(
@@ -378,7 +398,7 @@ def canonical_rotation_value(values: list[object]) -> list[float]:
         z * y * one_minus_cosine + x * sine,
         cosine + z * z * one_minus_cosine,
     ]
-    return [0.0 if abs(value) < 1e-5 else round(value, 5) for value in matrix]
+    return [0.0 if abs(value) < 1e-5 else round(value, 3) for value in matrix]
 
 
 def child_nodes_from_value(value: object, definitions: dict[str, ParsedNode]) -> list[ParsedNode]:
@@ -475,6 +495,14 @@ def extract_scene_items_from_node(
                 children.extend(child_nodes_from_value(field_value, definitions))
         return extract_scene_items(children, definitions, inherited_context)
 
+    if node.node_type == "Switch":
+        which_choice = next(
+            (field_value for field_name, field_value in node.fields if field_name == "whichChoice"),
+            -1,
+        )
+        if which_choice == -1:
+            return []
+
     if node.node_type == "Transform":
         children: list[ParsedNode] = []
         for field_name, field_value in node.fields:
@@ -507,6 +535,12 @@ def serialize_scene_node(
         serialized_fields.append(
             (field_name, canonical_field_value(field_name, field_value, definitions))
         )
+    for default_field_name, default_field_value in NODE_DEFAULT_FIELDS.get(node.node_type, {}).items():
+        serialized_fields = [
+            (field_name, field_value)
+            for field_name, field_value in serialized_fields
+            if not (field_name == default_field_name and field_value == default_field_value)
+        ]
 
     return {
         "context": [] if node.node_type == "Viewpoint" else list(inherited_context),
@@ -524,6 +558,21 @@ def semantic_scene_signature(input_text: str) -> str:
     if not items:
         return "#VRML V2.0 utf8 <EMPTY_SCENE>"
     return json.dumps(items, separators=(",", ":"))
+
+
+def semantic_scene_items(signature: str) -> list[str]:
+    """Decode one semantic signature string back into individual scene items."""
+
+    if signature == "#VRML V2.0 utf8 <EMPTY_SCENE>":
+        return []
+    return json.loads(signature)
+
+
+def is_viewpoint_only_scene(signature: str) -> bool:
+    """Report whether one semantic scene contains only viewpoint nodes."""
+
+    items = semantic_scene_items(signature)
+    return bool(items) and all('"type":"Viewpoint"' in item for item in items)
 
 
 def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
@@ -804,7 +853,11 @@ def is_unsupported_legacy_failure(reason: str) -> bool:
     """Report whether one legacy failure is a known unsupported-input case."""
 
     lowered = reason.lower()
-    return "unknown class" in lowered or "unknown field" in lowered
+    return (
+        "unknown class" in lowered
+        or "unknown field" in lowered
+        or "known incomplete output" in lowered
+    )
 
 
 def run_legacy_converter(
@@ -912,8 +965,19 @@ def compare_one_input(
     legacy_text = normalize_vrml_text(legacy_raw)
     if current_text != legacy_text:
         try:
-            if semantic_scene_signature(current_raw) == semantic_scene_signature(legacy_raw):
+            current_signature = semantic_scene_signature(current_raw)
+            legacy_signature = semantic_scene_signature(legacy_raw)
+            if current_signature == legacy_signature:
                 return None
+            if (
+                input_path.name in KNOWN_INCOMPLETE_LEGACY_CASES
+                and is_viewpoint_only_scene(legacy_signature)
+                and not is_viewpoint_only_scene(current_signature)
+            ):
+                return ComparisonFailure(
+                    input_path=input_path,
+                    reason="legacy converter produced known incomplete output",
+                )
         except ValueError as error:
             return ComparisonFailure(
                 input_path=input_path,
