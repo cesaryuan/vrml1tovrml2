@@ -13,7 +13,8 @@
 
 ## 当前状态
 
-- 已可完成仓库内示例和当前回归样例的转换。
+- 已可完成仓库内示例、已纳入基线比对的回归样例，以及仓库内公开 VRML 1.0 样例集的转换。
+- `cargo test --test public_v1_regression` 当前已经可以通过，覆盖了已登记基线的精确输出比对，以及更大范围的“至少能成功解析并转换”的公开样例扫描。
 - 已覆盖常见的 VRML 1.0 / Open Inventor 风格节点。
 - 仍属于“持续补齐兼容性”的阶段，遇到历史私有扩展节点或罕见字段组合时，建议结合真实样本继续回归。
 
@@ -104,10 +105,18 @@ wrl/
 - [sample_minimal](./wrl/cases/sample_minimal)
 - [ansys_test_from_ansys_1](./wrl/cases/ansys_test_from_ansys_1)
 
+公开样例输入位于 [tests/data/public_v1_cases](./tests/data/public_v1_cases)，用于在不为每个外部样例都维护 golden 输出的前提下，扩大解析和转换覆盖面。
+
 更新回归输出：
 
 ```bash
 ./scripts/regenerate_testset.sh
+```
+
+运行当前 Rust 回归测试：
+
+```bash
+cargo test --test public_v1_regression
 ```
 
 ## 仓库结构
@@ -118,6 +127,7 @@ wrl/
 - [vrml1tovrml2_pkg](./vrml1tovrml2_pkg)：Python 模块化实现
 - [examples](./examples)：示例输入输出
 - [wrl/cases](./wrl/cases)：回归样例与基线数据
+- [tests](./tests)：Rust 集成测试与公开 VRML 1.0 样例输入
 - [scripts](./scripts)：辅助脚本
 
 ## 当前限制
@@ -127,9 +137,3 @@ wrl/
 - `MatrixTransform` 目前以常见仿射场景为主，重点保留平移和轴向缩放。
 - 复杂绑定关系、少见字段组合和历史兼容细节，仍需要结合真实项目样本继续验证。
 - 当前已经完成部分内存优化，但整体仍不是完全“边解析边输出”的最终大文件方案。
-
-## 公开发布前建议
-
-- 如果准备正式开源，建议补上 `LICENSE`。
-- 如果后续需要多语言展示，可以在当前简体中文基础上继续增加英文 README。
-- 如果你手里还有来自旧流程的 `.wrl` 样本，建议继续沉淀到 [wrl/cases](./wrl/cases) 中，方便后续回归。

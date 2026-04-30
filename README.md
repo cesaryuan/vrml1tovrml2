@@ -13,7 +13,8 @@
 
 ## Project Status
 
-- The current implementation successfully converts the sample inputs and checked-in regression cases in this repository.
+- The current implementation successfully converts the sample inputs, the checked-in baseline cases, and the vendored public VRML 1.0 sample set in this repository.
+- `cargo test --test public_v1_regression` currently passes, covering both exact checked-in baseline comparisons and a broader "must parse and convert successfully" public sample sweep.
 - Common VRML 1.0 / Open Inventor style nodes are already covered.
 - Compatibility work is still ongoing, especially for rare historical extensions and unusual field combinations.
 
@@ -104,10 +105,18 @@ Current checked-in cases:
 - [sample_minimal](./wrl/cases/sample_minimal)
 - [ansys_test_from_ansys_1](./wrl/cases/ansys_test_from_ansys_1)
 
+Public sample inputs are vendored under [tests/data/public_v1_cases](./tests/data/public_v1_cases) to widen parser and converter coverage without requiring golden outputs for every external sample set.
+
 To regenerate the current regression outputs:
 
 ```bash
 ./scripts/regenerate_testset.sh
+```
+
+To run the current Rust regression tests:
+
+```bash
+cargo test --test public_v1_regression
 ```
 
 ## Repository Layout
@@ -118,6 +127,7 @@ To regenerate the current regression outputs:
 - [vrml1tovrml2_pkg](./vrml1tovrml2_pkg): modular Python implementation
 - [examples](./examples): sample input and output files
 - [wrl/cases](./wrl/cases): regression cases and baselines
+- [tests](./tests): Rust integration tests and vendored public VRML 1.0 sample inputs
 - [scripts](./scripts): helper scripts
 
 ## Current Limitations
