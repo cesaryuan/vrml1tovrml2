@@ -90,6 +90,40 @@ textarea {
   line-height: 1.65;
 }
 
+.project-link-row {
+  margin: 12px 0 0;
+}
+
+.project-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid #bfd3fb;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 0.92rem;
+  font-weight: 500;
+  text-decoration: none;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.project-link:hover {
+  border-color: #93b4f6;
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.project-link:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14);
+}
+
 .header-meta {
   display: flex;
   flex-wrap: wrap;
