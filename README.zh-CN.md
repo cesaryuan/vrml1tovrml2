@@ -2,21 +2,21 @@
 
 [默认 README](./README.md)
 
-`vrml1tovrml2` 是一个面向 Linux 工作流的 VRML 1.0 到 VRML 2.0 转换工具，用来替代历史上的 Windows `vrml1tovrml2.exe` 流程。当前仓库提供 Rust 原生命令行实现，并保留 Python 兼容接口与模块化实现，便于继续回归和扩展。
+`vrml1tovrml2` 是一个面向 Linux 工作流的 VRML 1.0 到 VRML 2.0 转换工具，用来替代历史上的 Windows `vrml1tovrml2.exe` 流程。当前仓库提供 Rust 原生命令行实现，以及浏览器侧的 WebAssembly 构建，便于继续回归和扩展。
 
 ## 项目定位
 
 - 面向已有 `.wrl` 资产的迁移与批量转换。
 - 目标是复现历史工具的可用工作流，而不是逐字节复刻原始二进制行为。
 - 当前默认入口是 Rust CLI，适合直接在 Linux、WSL 和 CI 环境中使用。
-- 仓库内保留了 Python 版本实现与样例数据，方便调试、对照和继续补齐兼容性。
+- 仓库内保留了样例数据与回归用例，方便继续补齐兼容性。
 
 ## 当前状态
 
 - 已可完成仓库内示例、已纳入基线比对的回归样例，以及仓库内公开 VRML 1.0 样例集的转换。
 - `cargo test --test public_v1_regression` 当前已经可以通过，覆盖了已登记基线的精确输出比对，以及更大范围的“至少能成功解析并转换”的公开样例扫描。
 - 已覆盖常见的 VRML 1.0 / Open Inventor 风格节点。
-- 仍属于“持续补齐兼容性”的阶段，遇到历史私有扩展节点或罕见字段组合时，建议结合真实样本继续回归。
+- 仍属于“持续补齐覆盖率”的阶段，遇到历史私有扩展节点或罕见字段组合时，建议结合真实样本继续回归。
 
 ## 快速开始
 
@@ -24,15 +24,6 @@
 
 - Rust 工具链
 - Bash
-- Python 3.13+（仅在使用 Python 兼容接口或辅助脚本时需要）
-
-如果你只使用默认的 Rust CLI，可以直接运行而不安装 Python 依赖。
-
-如果你需要 Python 兼容接口和部分辅助脚本，再安装：
-
-```bash
-pip install -e .
-```
 
 ### 直接运行
 
@@ -114,7 +105,7 @@ wrl/
     <case-name>/
       input.v1.wrl
       baseline.v2.from_exe.wrl
-      current.v2.from_python.wrl
+      current.v2.from_rust.wrl
 ```
 
 当前已整理的 case：
@@ -140,8 +131,6 @@ cargo test --test public_v1_regression
 
 - [vrml1tovrml2](./vrml1tovrml2)：默认命令行入口脚本
 - [src](./src)：Rust CLI、解析、转换和写出实现
-- [vrml1tovrml2.py](./vrml1tovrml2.py)：Python 兼容入口
-- [vrml1tovrml2_pkg](./vrml1tovrml2_pkg)：Python 模块化实现
 - [examples](./examples)：示例输入输出
 - [wrl/cases](./wrl/cases)：回归样例与基线数据
 - [tests](./tests)：Rust 集成测试与公开 VRML 1.0 样例输入

@@ -2,21 +2,21 @@
 
 [简体中文](./README.zh-CN.md)
 
-`vrml1tovrml2` is a VRML 1.0 to VRML 2.0 converter designed for Linux-based workflows as a replacement for the legacy Windows `vrml1tovrml2.exe` pipeline. This repository provides a Rust-native command-line implementation while keeping the Python compatibility entrypoint and modular implementation for regression work and future extensions.
+`vrml1tovrml2` is a VRML 1.0 to VRML 2.0 converter designed for Linux-based workflows as a replacement for the legacy Windows `vrml1tovrml2.exe` pipeline. This repository now ships a Rust-native command-line implementation and browser-side WebAssembly build for regression work and future extensions.
 
 ## Overview
 
 - Built for migrating and batch-converting existing `.wrl` assets.
 - Focused on reproducing the practical workflow of the historical tool rather than byte-for-byte behavior of the original binary.
 - Uses a Rust CLI as the default entrypoint, making it suitable for Linux, WSL, and CI environments.
-- Keeps the Python implementation and sample data in the repository for debugging, comparison, and compatibility work.
+- Includes sample data and checked-in regression cases for ongoing compatibility work.
 
 ## Project Status
 
 - The current implementation successfully converts the sample inputs, the checked-in baseline cases, and the vendored public VRML 1.0 sample set in this repository.
 - `cargo test --test public_v1_regression` currently passes, covering both exact checked-in baseline comparisons and a broader "must parse and convert successfully" public sample sweep.
 - Common VRML 1.0 / Open Inventor style nodes are already covered.
-- Compatibility work is still ongoing, especially for rare historical extensions and unusual field combinations.
+- Coverage work is still ongoing, especially for rare historical extensions and unusual field combinations.
 
 ## Quick Start
 
@@ -24,15 +24,6 @@
 
 - Rust toolchain
 - Bash
-- Python 3.13+ (only needed for the Python compatibility API or helper scripts)
-
-If you only use the default Rust CLI, you can run the converter without installing Python dependencies.
-
-If you need the Python compatibility layer or helper scripts, install them with:
-
-```bash
-pip install -e .
-```
 
 ### Run the Converter
 
@@ -114,7 +105,7 @@ wrl/
     <case-name>/
       input.v1.wrl
       baseline.v2.from_exe.wrl
-      current.v2.from_python.wrl
+      current.v2.from_rust.wrl
 ```
 
 Current checked-in cases:
@@ -140,8 +131,6 @@ cargo test --test public_v1_regression
 
 - [vrml1tovrml2](./vrml1tovrml2): default command-line launcher
 - [src](./src): Rust CLI, parser, converter, and writer implementation
-- [vrml1tovrml2.py](./vrml1tovrml2.py): Python compatibility entrypoint
-- [vrml1tovrml2_pkg](./vrml1tovrml2_pkg): modular Python implementation
 - [examples](./examples): sample input and output files
 - [wrl/cases](./wrl/cases): regression cases and baselines
 - [tests](./tests): Rust integration tests and vendored public VRML 1.0 sample inputs

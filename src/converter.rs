@@ -135,7 +135,7 @@ impl<'a> Converter<'a> {
         }
     }
 
-    /// Convert root statements and wrap them like the existing Python implementation.
+    /// Convert root statements and wrap them like the established converter output.
     fn convert(&mut self, statements: &[Statement]) -> Result<Vec<OutNode>, VrmlError> {
         let mut state = ConversionState::default();
         let mut nodes = self.convert_sequence(statements, &mut state)?;
@@ -145,7 +145,7 @@ impl<'a> Converter<'a> {
         Ok(nodes)
     }
 
-    /// Wrap the scene in `Collision` and `Group` nodes like the Python converter.
+    /// Wrap the scene in `Collision` and `Group` nodes like the established converter output.
     fn wrap_root(&self, nodes: Vec<OutNode>) -> OutNode {
         let group_children =
             if nodes.len() == 1 && nodes[0].node_type == "Group" && nodes[0].def_name.is_none() {

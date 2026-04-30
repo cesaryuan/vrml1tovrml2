@@ -9,7 +9,7 @@ run_case() {
   # Rebuild one checked-in case and show the diff to its saved exe baseline.
   local case_dir="$1"
   local input_file="${ROOT_DIR}/wrl/cases/${case_dir}/input.v1.wrl"
-  local current_file="${ROOT_DIR}/wrl/cases/${case_dir}/current.v2.from_python.wrl"
+  local current_file="${ROOT_DIR}/wrl/cases/${case_dir}/current.v2.from_rust.wrl"
   local baseline_file="${ROOT_DIR}/wrl/cases/${case_dir}/baseline.v2.from_exe.wrl"
 
   echo "[info] regenerating case: ${case_dir}"
