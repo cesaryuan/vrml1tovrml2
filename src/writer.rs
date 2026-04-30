@@ -5,6 +5,7 @@ use std::io::{self, Write};
 use crate::model::{OutNode, Value};
 
 const VRML2_HEADER: &str = "#VRML V2.0 utf8";
+const COMPACT_COORD_INDEX_VALUES_PER_LINE: usize = 5;
 
 /// Serialize VRML 2.0 output nodes into textual `.wrl` content.
 pub struct VrmlWriter;
@@ -85,7 +86,7 @@ impl<'a, W: Write> WriterState<'a, W> {
         }
     }
 
-    /// Write one node with indentation that matches the Python writer.
+    /// Write one node with indentation that matches the established output format.
     fn write_node(&mut self, node: &OutNode, indent: usize) -> io::Result<()> {
         self.write_indent(indent)?;
         if let Some(def_name) = &node.def_name {
@@ -139,6 +140,9 @@ impl<'a, W: Write> WriterState<'a, W> {
                 self.write_indent(indent)?;
                 self.writer.write_all(b"]")?;
             }
+            Value::List(values) if should_write_compact_coord_index(field_name, values) => {
+                self.write_compact_scalar_list(values, indent)?;
+            }
             Value::List(values) => {
                 self.writer.write_all(b" [\n")?;
                 for (index, item) in values.iter().enumerate() {
@@ -159,6 +163,33 @@ impl<'a, W: Write> WriterState<'a, W> {
         }
 
         self.writer.write_all(b"\n")?;
+        Ok(())
+    }
+
+    /// Write a scalar list with multiple values packed onto each output line.
+    fn write_compact_scalar_list(&mut self, values: &[Value], indent: usize) -> io::Result<()> {
+        self.writer.write_all(b" [\n")?;
+
+        for (index, item) in values.iter().enumerate() {
+            if index % COMPACT_COORD_INDEX_VALUES_PER_LINE == 0 {
+                self.write_indent(indent + 2)?;
+            }
+
+            self.write_scalar(item)?;
+
+            if index + 1 < values.len() {
+                self.writer.write_all(b",")?;
+            }
+
+            if (index + 1) % COMPACT_COORD_INDEX_VALUES_PER_LINE == 0 || index + 1 == values.len() {
+                self.writer.write_all(b"\n")?;
+            } else if index + 1 < values.len() {
+                self.writer.write_all(b" ")?;
+            }
+        }
+
+        self.write_indent(indent)?;
+        self.writer.write_all(b"]")?;
         Ok(())
     }
 
@@ -206,7 +237,7 @@ impl<'a, W: Write> WriterState<'a, W> {
         }
     }
 
-    /// Write one logical indentation level using tabs like the Python writer.
+    /// Write one logical indentation level using the established tab-based format.
     fn write_indent(&mut self, indent: usize) -> io::Result<()> {
         for _ in 0..(indent / 2) {
             self.writer.write_all(b"\t")?;
@@ -227,6 +258,11 @@ fn is_node_like(value: &Value) -> bool {
     matches!(value, Value::Node(_) | Value::Use(_))
 }
 
+/// Return whether a field should use compact multi-value formatting.
+fn should_write_compact_coord_index(field_name: &str, values: &[Value]) -> bool {
+    field_name == "coordIndex" && values.iter().all(|value| matches!(value, Value::Int(_)))
+}
+
 /// Format a float without noisy trailing zeros.
 fn format_number(value: f64) -> String {
     let text = format!("{value:.9}");
@@ -235,5 +271,29 @@ fn format_number(value: f64) -> String {
         "0".to_owned()
     } else {
         text.to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::VrmlWriter;
+    use crate::model::{OutNode, Value};
+
+    #[test]
+    /// Keep `coordIndex` lists compact so large meshes stay readable.
+    fn coord_index_uses_five_values_per_line() {
+        let mut node = OutNode::new("IndexedFaceSet");
+        node.fields.push((
+            "coordIndex".to_owned(),
+            Value::List((0..12).map(Value::Int).collect()),
+        ));
+
+        let output = VrmlWriter::write(&[node]);
+
+        assert!(
+            output.contains(
+                "\tcoordIndex [\n\t\t0, 1, 2, 3, 4,\n\t\t5, 6, 7, 8, 9,\n\t\t10, 11\n\t]\n"
+            )
+        );
     }
 }
