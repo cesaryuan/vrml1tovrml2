@@ -237,10 +237,10 @@ impl<'a, W: Write> WriterState<'a, W> {
         }
     }
 
-    /// Write one logical indentation level using the established tab-based format.
+    /// Write one logical indentation level using two spaces per level.
     fn write_indent(&mut self, indent: usize) -> io::Result<()> {
         for _ in 0..(indent / 2) {
-            self.writer.write_all(b"\t")?;
+            self.writer.write_all(b"  ")?;
         }
         Ok(())
     }
@@ -292,7 +292,7 @@ mod tests {
 
         assert!(
             output.contains(
-                "\tcoordIndex [\n\t\t0, 1, 2, 3, 4,\n\t\t5, 6, 7, 8, 9,\n\t\t10, 11\n\t]\n"
+                "  coordIndex [\n    0, 1, 2, 3, 4,\n    5, 6, 7, 8, 9,\n    10, 11\n  ]\n"
             )
         );
     }
