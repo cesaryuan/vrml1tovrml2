@@ -131,6 +131,7 @@ name = "vrml1tovrml2-rs"
 version = "0.1.0"
 dependencies = [
  "indicatif",
+ "wasm-bindgen",
 ]
 
 [[package]]

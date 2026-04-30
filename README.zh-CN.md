@@ -68,6 +68,23 @@ pip install -e .
 cargo build --release
 ```
 
+## GitHub Pages 在线页面
+
+仓库现在已经包含浏览器端 WebAssembly 页面源码 [web](./web) 以及自动部署工作流 [deploy-pages.yml](./.github/workflows/deploy-pages.yml)。
+
+在仓库设置里启用 GitHub Pages 后，每次推送到 `main` 都可以发布在线转换页：
+
+```text
+https://<owner>.github.io/vrml1tovrml2/
+```
+
+页面支持：
+
+- 直接在浏览器中上传 VRML 1.0 `.wrl` 文件
+- 一键加载仓库自带样例做快速验证
+- 使用编译为 WebAssembly 的 Rust 转换核心生成 VRML 2.0
+- 在不上传到服务器的前提下复制或下载转换结果
+
 ## 已支持并验证的节点
 
 - 分组与层级：`Separator`, `TransformSeparator`, `Group`, `Switch`, `LOD`

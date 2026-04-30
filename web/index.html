@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>vrml1tovrml2 | VRML 1.0 to VRML 2.0 Online Converter</title>
+    <meta
+      name="description"
+      content="Convert VRML 1.0 .wrl files to VRML 2.0 directly in the browser with the Rust-powered vrml1tovrml2 GitHub Pages app."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero">
+        <p class="eyebrow">VRML Migration Toolkit</p>
+        <h1>vrml1tovrml2</h1>
+        <p class="hero-copy">
+          Convert legacy VRML 1.0 <code>.wrl</code> files to VRML 2.0 directly in your browser.
+          上传文件、在线转换、立即下载，不需要后端服务。
+        </p>
+        <div class="hero-actions">
+          <a class="primary-link" href="#online-usage">How It Works / 使用说明</a>
+          <button class="secondary-link" id="load-sample" type="button">Load Sample / 加载示例</button>
+        </div>
+        <dl class="hero-metrics">
+          <div>
+            <dt>Runtime</dt>
+            <dd>Rust + WASM</dd>
+          </div>
+          <div>
+            <dt>Privacy</dt>
+            <dd>Browser-only</dd>
+          </div>
+          <div>
+            <dt>Workflow</dt>
+            <dd>Upload, convert, download</dd>
+          </div>
+        </dl>
+      </header>
+
+      <main class="content-grid">
+        <section class="panel converter-panel">
+          <div class="panel-header">
+            <div>
+              <p class="panel-kicker">Online Converter</p>
+              <h2>Convert a file now</h2>
+            </div>
+            <span class="status-badge" id="status-badge">Initializing WASM...</span>
+          </div>
+
+          <div class="toolbar">
+            <label class="file-picker" for="source-file">
+              <span>Upload .wrl / 上传 .wrl</span>
+              <input id="source-file" type="file" accept=".wrl,.iv,.txt,text/plain" />
+            </label>
+            <button id="convert-button" type="button">Convert in Browser / 浏览器内转换</button>
+            <button id="copy-button" type="button">Copy Output / 复制结果</button>
+            <button id="download-button" type="button">Download .wrl / 下载 .wrl</button>
+          </div>
+
+          <p class="status-line" id="status-line">
+            The page is loading the WebAssembly converter. 页面正在加载浏览器内转换器。
+          </p>
+
+          <div class="editor-grid">
+            <label class="editor-card" for="source-text">
+              <span>VRML 1.0 Input / 输入</span>
+              <textarea
+                id="source-text"
+                spellcheck="false"
+                placeholder="#VRML V1.0 ascii&#10;Separator {&#10;  Cube { width 2 height 2 depth 2 }&#10;}"
+              ></textarea>
+            </label>
+            <label class="editor-card" for="output-text">
+              <span>VRML 2.0 Output / 输出</span>
+              <textarea
+                id="output-text"
+                spellcheck="false"
+                readonly
+                placeholder="Converted VRML 2.0 output will appear here."
+              ></textarea>
+            </label>
+          </div>
+        </section>
+
+        <section class="panel info-panel" id="online-usage">
+          <p class="panel-kicker">Suggested GitHub Description</p>
+          <h2>Repository tagline</h2>
+          <p class="description-card">
+            A Rust-powered VRML 1.0 to VRML 2.0 converter for Linux, WSL, and CI workflows, with
+            browser-based conversion via GitHub Pages.
+          </p>
+
+          <p class="panel-kicker">How It Works</p>
+          <h2>Online usage</h2>
+          <ol class="steps">
+            <li>Upload a legacy VRML 1.0 <code>.wrl</code> file or load the sample scene.</li>
+            <li>Click <strong>Convert in Browser</strong> to run the Rust converter in WebAssembly.</li>
+            <li>Review the VRML 2.0 result, then copy or download it for downstream use.</li>
+          </ol>
+
+          <p class="note">
+            Files stay in your browser session and are not uploaded to a server. 所有转换都在本地浏览器内完成。
+          </p>
+        </section>
+
+        <section class="panel info-panel" id="cli-workflow">
+          <p class="panel-kicker">CLI Workflow</p>
+          <h2>Batch conversion on your machine</h2>
+          <pre><code>./vrml1tovrml2 input_v1.wrl output_v2.wrl
+./vrml1tovrml2 --progress input_v1.wrl output_v2.wrl
+cargo test --test public_v1_regression</code></pre>
+          <p class="note">
+            The browser tool is ideal for quick checks. For batch jobs and regression testing, keep
+            using the repository CLI.
+          </p>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

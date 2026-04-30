@@ -68,6 +68,23 @@ If you want to build first and run afterward:
 cargo build --release
 ```
 
+## GitHub Pages Online Demo
+
+The repository now includes a browser-side WebAssembly demo under [web](./web) and an automatic GitHub Pages workflow at [deploy-pages.yml](./.github/workflows/deploy-pages.yml).
+
+After enabling GitHub Pages in the repository settings, each push to `main` can publish an online converter at:
+
+```text
+https://<owner>.github.io/vrml1tovrml2/
+```
+
+The page lets you:
+
+- Upload a VRML 1.0 `.wrl` file directly in the browser
+- Load the bundled sample input for a quick smoke test
+- Convert to VRML 2.0 with the Rust core compiled to WebAssembly
+- Copy or download the converted `.wrl` output without sending files to a server
+
 ## Supported and Verified Nodes
 
 - Grouping and hierarchy: `Separator`, `TransformSeparator`, `Group`, `Switch`, `LOD`
